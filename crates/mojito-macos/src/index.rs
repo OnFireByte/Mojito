@@ -1,17 +1,63 @@
 //! App index: NSWorkspace recency ring + CGWindowList window counts,
 //! published as ArcSwap<AppIndex> for the engine to read lock-free.
+//! Main thread only: every method is called from the AppKit event loop.
 
-use mojito_core::AppIndex;
-use std::sync::Arc;
+use std::collections::HashMap;
+use std::ffi::c_void;
+use std::ptr::NonNull;
+use std::sync::{Arc, Mutex};
+
 use arc_swap::ArcSwap;
+use objc2::MainThreadMarker;
+use objc2::rc::Retained;
+use objc2::runtime::{NSObjectProtocol, ProtocolObject};
+use objc2_app_kit::{NSApplicationActivationPolicy, NSRunningApplication, NSWorkspace};
+use objc2_core_foundation::{CFArray, CFDictionary, CFNumber, CFString};
+use objc2_foundation::{NSNotification, NSString};
+
+use mojito_core::bridge::{AppIndex, AppSlot};
+
+type Observer = Retained<ProtocolObject<dyn NSObjectProtocol>>;
+
+/// `kCGWindowListOptionOnScreenOnly`; layer 0 is normal windows.
+const ON_SCREEN_ONLY: u32 = 1 << 0;
+const LAYER_NORMAL: i64 = 0;
+
+#[link(name = "CoreGraphics", kind = "framework")]
+unsafe extern "C" {
+    fn CGWindowListCopyWindowInfo(option: u32, window_id: u32) -> *const c_void;
+    fn CFRelease(value: *const c_void);
+}
 
 pub struct AppIndexHandle {
     current: Arc<ArcSwap<AppIndex>>,
+    /// Recency-ordered regular running apps, most recently touched first.
+    /// Only the main thread touches it.
+    ring: Arc<Mutex<Vec<AppSlot>>>,
+    /// NSWorkspace block observers; alive for the process lifetime.
+    observers: Mutex<Vec<Observer>>,
+}
+
+#[derive(Clone, Copy)]
+enum Kind {
+    Activate,
+    Launch,
+    Terminate,
+}
+
+impl Default for AppIndexHandle {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl AppIndexHandle {
     pub fn new() -> Self {
-        Self { current: Arc::new(ArcSwap::from_pointee(AppIndex::default())) }
+        Self {
+            current: Arc::new(ArcSwap::from_pointee(AppIndex::default())),
+            ring: Arc::new(Mutex::new(Vec::new())),
+            observers: Mutex::new(Vec::new()),
+        }
     }
 
     pub fn handle(&self) -> Arc<ArcSwap<AppIndex>> {
@@ -21,12 +67,199 @@ impl AppIndexHandle {
     /// Install NSWorkspace observers (activate/launch/terminate) and refresh
     /// the ring. Runs on the main thread.
     pub fn start(&self) {
-        todo!("index::start")
+        if MainThreadMarker::new().is_none() {
+            eprintln!("mojito-macos: the app index requires the main thread");
+            return;
+        }
+        seed_ring(&mut self.ring.lock().unwrap_or_else(|error| error.into_inner()));
+        publish(&self.current, &self.ring);
+
+        let center = NSWorkspace::sharedWorkspace().notificationCenter();
+        // SAFETY: reading the notification-name extern statics.
+        let notifications = unsafe {
+            [
+                (
+                    objc2_app_kit::NSWorkspaceDidActivateApplicationNotification,
+                    Kind::Activate,
+                ),
+                (
+                    objc2_app_kit::NSWorkspaceDidLaunchApplicationNotification,
+                    Kind::Launch,
+                ),
+                (
+                    objc2_app_kit::NSWorkspaceDidTerminateApplicationNotification,
+                    Kind::Terminate,
+                ),
+            ]
+        };
+        for (name, kind) in notifications {
+            let ring = Arc::clone(&self.ring);
+            let current = Arc::clone(&self.current);
+            let block = block2::RcBlock::new(move |note: NonNull<NSNotification>| {
+                // SAFETY: the center hands a valid notification to the block.
+                let note = unsafe { note.as_ref() };
+                observe(&current, &ring, kind, note);
+            });
+            // SAFETY: the block runs on the main thread and stays registered
+            // (and alive) for the process lifetime via `observers`.
+            let observer = unsafe {
+                center.addObserverForName_object_queue_usingBlock(Some(name), None, None, &block)
+            };
+            self.observers
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .push(observer);
+        }
     }
 
     /// CGWindowList layer-0 on-screen window counts per pid, merged into the
     /// published index. No kCGWindowName reads.
     pub fn refresh_window_counts(&self) {
-        todo!("refresh_window_counts")
+        if MainThreadMarker::new().is_none() {
+            eprintln!("mojito-macos: window counts require the main thread");
+            return;
+        }
+        let counts = on_screen_window_counts();
+        {
+            let mut ring = self.ring.lock().unwrap_or_else(|error| error.into_inner());
+            for slot in ring.iter_mut() {
+                slot.windows = counts.get(&slot.pid).copied().unwrap_or(0);
+            }
+        }
+        publish(&self.current, &self.ring);
     }
+}
+
+/// Snapshot the ring into the published index, flagging the frontmost app.
+fn publish(current: &Arc<ArcSwap<AppIndex>>, ring: &Mutex<Vec<AppSlot>>) {
+    let frontmost = NSWorkspace::sharedWorkspace()
+        .frontmostApplication()
+        .map(|app| app.processIdentifier());
+    let mut index = AppIndex::default();
+    let mut ring = ring.lock().unwrap_or_else(|error| error.into_inner());
+    for slot in ring.iter_mut() {
+        slot.is_frontmost = frontmost.is_some_and(|pid| pid == slot.pid);
+    }
+    index.slots.clone_from(&ring);
+    drop(ring);
+    current.store(Arc::new(index));
+}
+
+/// Seed the recency ring from the current running applications, frontmost
+/// first (recency is unknown at launch; activation notifications take over).
+fn seed_ring(ring: &mut Vec<AppSlot>) {
+    let workspace = NSWorkspace::sharedWorkspace();
+    let frontmost = workspace
+        .frontmostApplication()
+        .map(|app| app.processIdentifier());
+    ring.clear();
+    let mut others = Vec::new();
+    for app in workspace.runningApplications().to_vec() {
+        if app.isTerminated() || app.activationPolicy() != NSApplicationActivationPolicy::Regular {
+            continue;
+        }
+        let slot = slot_for(&app);
+        if frontmost.is_some_and(|pid| pid == slot.pid) {
+            ring.push(slot);
+        } else {
+            others.push(slot);
+        }
+    }
+    ring.extend(others);
+}
+
+fn slot_for(app: &NSRunningApplication) -> AppSlot {
+    AppSlot {
+        pid: app.processIdentifier(),
+        bundle_id: app.bundleIdentifier().map(|id| id.to_string()),
+        name: app
+            .localizedName()
+            .map(|name| name.to_string())
+            .or_else(|| app.bundleIdentifier().map(|id| id.to_string()))
+            .unwrap_or_else(|| "Unknown app".into()),
+        windows: 0,
+        is_frontmost: false,
+    }
+}
+
+/// Move the observed app to the front of the ring (or drop it on terminate)
+/// and republish. NSWorkspace notifications arrive on the main thread.
+fn observe(
+    current: &Arc<ArcSwap<AppIndex>>,
+    ring: &Mutex<Vec<AppSlot>>,
+    kind: Kind,
+    note: &NSNotification,
+) {
+    if MainThreadMarker::new().is_none() {
+        return;
+    }
+    let Some(app) = observed_app(note) else {
+        return;
+    };
+    {
+        let mut ring = ring.lock().unwrap_or_else(|error| error.into_inner());
+        match kind {
+            Kind::Terminate => ring.retain(|slot| slot.pid != app.processIdentifier()),
+            Kind::Activate | Kind::Launch => {
+                // Only regular apps belong in the switcher ring.
+                if app.activationPolicy() == NSApplicationActivationPolicy::Regular {
+                    let slot = slot_for(&app);
+                    ring.retain(|existing| existing.pid != slot.pid);
+                    ring.insert(0, slot);
+                }
+            }
+        }
+    }
+    publish(current, ring);
+}
+
+/// `NSWorkspaceApplicationKey` -> the NSRunningApplication the notification
+/// is about.
+fn observed_app(note: &NSNotification) -> Option<Retained<NSRunningApplication>> {
+    let info = note.userInfo()?;
+    let object = info.objectForKey(&*NSString::from_str("NSWorkspaceApplicationKey"))?;
+    // SAFETY: NSWorkspace puts an NSRunningApplication under this key.
+    Some(unsafe { Retained::cast_unchecked::<NSRunningApplication>(object) })
+}
+
+/// Layer-0 on-screen window counts keyed by owning pid. Minimized and
+/// hidden apps' windows are not on-screen, matching the Live-list rule.
+fn on_screen_window_counts() -> HashMap<i32, u8> {
+    let mut counts = HashMap::new();
+    // SAFETY: CoreGraphics returns a +1 CFArray of CFDictionary window info.
+    let list = unsafe { CGWindowListCopyWindowInfo(ON_SCREEN_ONLY, 0) };
+    if list.is_null() {
+        return counts;
+    }
+    // SAFETY: the array lives until the release below and holds dictionaries.
+    let array = unsafe { &*(list as *const CFArray<CFDictionary>) };
+    for index in 0..array.len() as isize {
+        // SAFETY: the index is in bounds and the array is not mutated.
+        let dict = unsafe { array.get_unchecked(index) };
+        let Some(layer) = dict_number(dict, "kCGWindowLayer") else {
+            continue;
+        };
+        if layer != LAYER_NORMAL {
+            continue;
+        }
+        let Some(pid) = dict_number(dict, "kCGWindowOwnerPID") else {
+            continue;
+        };
+        let count = counts.entry(pid as i32).or_insert(0_u8);
+        *count = (*count).saturating_add(1);
+    }
+    // SAFETY: the list was retained by the copy call above.
+    unsafe { CFRelease(list) };
+    counts
+}
+
+fn dict_number(dict: &CFDictionary, key: &str) -> Option<i64> {
+    // SAFETY: the dictionary is alive and its values are CF objects.
+    let key = CFString::from_str(key);
+    let value = unsafe { dict.value(&*key as *const CFString as *const c_void) };
+    if value.is_null() {
+        return None;
+    }
+    // SAFETY: kCGWindowLayer/kCGWindowOwnerPID values are CFNumbers.
+    unsafe { &*(value as *const CFNumber) }.as_i64()
 }
