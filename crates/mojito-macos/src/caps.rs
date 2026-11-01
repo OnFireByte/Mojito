@@ -376,17 +376,17 @@ mod tests {
 
     #[test]
     fn merge_tolerates_the_hidutil_output_prefix_and_decimal_values() {
-        let existing = "(\"UserKeyMapping\") = [\n  {\n    \"HIDKeyboardModifierMappingSrc\" : 30064771129,\n    \"HIDKeyboardModifierMappingDst\" : 30064771113\n  }\n]";
+        let existing = "(\"UserKeyMapping\") = [\n  {\n    \"HIDKeyboardModifierMappingSrc\" : 30064771114,\n    \"HIDKeyboardModifierMappingDst\" : 30064771113\n  }\n]";
         let merged = merge_mapping(existing, OURS).unwrap();
-        assert!(contains_pair(&merged, (30064771129, 30064771113)));
+        assert!(contains_pair(&merged, (30064771114, 30064771113)));
         assert!(contains_pair(&merged, OURS));
     }
 
     #[test]
     fn merge_accepts_hex_string_values() {
-        let existing = r#"[{"HIDKeyboardModifierMappingSrc":"0x700000039","HIDKeyboardModifierMappingDst":"0x700000029"}]"#;
+        let existing = r#"[{"HIDKeyboardModifierMappingSrc":"0x700000042","HIDKeyboardModifierMappingDst":"0x700000029"}]"#;
         let merged = merge_mapping(existing, OURS).unwrap();
-        assert!(contains_pair(&merged, (0x700000039, 0x700000029)));
+        assert!(contains_pair(&merged, (0x700000042, 0x700000029)));
     }
 
     #[test]
