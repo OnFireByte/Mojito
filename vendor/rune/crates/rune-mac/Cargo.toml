@@ -1,0 +1,11 @@
+[package]
+name = "rune-mac"
+version = "0.0.1"
+edition = "2024"
+license = "MIT"
+description = "Small macOS helpers for Rune apps: a remembered window frame, full screen, quiet relaunches with scripts/mac-app, and system notifications."
+
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = "0.5.2"
+block2 = "0.5"
+

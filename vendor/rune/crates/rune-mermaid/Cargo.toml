@@ -1,0 +1,10 @@
+[package]
+name = "rune-mermaid"
+version = "0.0.1"
+edition = "2024"
+license = "MIT"
+description = "Native Mermaid diagrams for Rune: flowcharts, sequence diagrams and state diagrams, drawn with Rune shapes and text."
+
+[dependencies]
+rune = { path = "../rune", default-features = false }
+

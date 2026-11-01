@@ -1,0 +1,11 @@
+[package]
+name = "rune-staging"
+version = "0.0.1"
+edition = "2024"
+license = "MIT"
+publish = false
+description = "Per-frame GPU uploads through reused staging memory, shared by Rune's renderers."
+
+[dependencies]
+wgpu = { version = "30", default-features = false, features = ["std"] }
+

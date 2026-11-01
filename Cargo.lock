@@ -2048,7 +2048,6 @@ checksum = "19b30a45b0cd0bcca8037f3d0dc3421eaf95327a17cad11964fb8179b4fc4832"
 [[package]]
 name = "rune"
 version = "0.0.1"
-source = "git+https://github.com/anomalyco/rune?rev=092dec2e40436d6835fe25ebc8a994fe67f3c9e4#092dec2e40436d6835fe25ebc8a994fe67f3c9e4"
 dependencies = [
  "arboard",
  "blake3",
@@ -2111,7 +2110,6 @@ dependencies = [
 [[package]]
 name = "rune-kit"
 version = "0.0.1"
-source = "git+https://github.com/anomalyco/rune?rev=092dec2e40436d6835fe25ebc8a994fe67f3c9e4#092dec2e40436d6835fe25ebc8a994fe67f3c9e4"
 dependencies = [
  "rune",
  "rune-motion",
@@ -2121,12 +2119,10 @@ dependencies = [
 [[package]]
 name = "rune-motion"
 version = "0.1.0"
-source = "git+https://github.com/anomalyco/rune?rev=092dec2e40436d6835fe25ebc8a994fe67f3c9e4#092dec2e40436d6835fe25ebc8a994fe67f3c9e4"
 
 [[package]]
 name = "rune-staging"
 version = "0.0.1"
-source = "git+https://github.com/anomalyco/rune?rev=092dec2e40436d6835fe25ebc8a994fe67f3c9e4#092dec2e40436d6835fe25ebc8a994fe67f3c9e4"
 dependencies = [
  "wgpu",
 ]
@@ -2134,7 +2130,6 @@ dependencies = [
 [[package]]
 name = "rune-theme-opencode"
 version = "0.0.1"
-source = "git+https://github.com/anomalyco/rune?rev=092dec2e40436d6835fe25ebc8a994fe67f3c9e4#092dec2e40436d6835fe25ebc8a994fe67f3c9e4"
 dependencies = [
  "rune",
  "rune-kit",
@@ -3529,3 +3524,11 @@ checksum = "27bc9d5b815bc103f142aa054f561d9187d191692ec7c2d1e2b4737f8dbd7296"
 dependencies = [
  "zune-core",
 ]
+
+[[patch.unused]]
+name = "procwatch"
+version = "0.1.0"
+
+[[patch.unused]]
+name = "rune-mermaid"
+version = "0.0.1"

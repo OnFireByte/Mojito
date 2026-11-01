@@ -1,0 +1,12 @@
+[package]
+name = "rune-theme-opencode"
+version = "0.0.1"
+edition = "2024"
+license = "MIT"
+description = "OpenCode's design language (@opencode/ui tokens, fonts, icons) as a rune-kit theme."
+
+[dependencies]
+rune = { path = "../../crates/rune", default-features = false }
+rune-kit = { path = "../../crates/rune-kit" }
+serde_json = "1"
+

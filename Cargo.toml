@@ -16,7 +16,17 @@ objc2-core-foundation = "0.3.2"
 objc2-foundation = "0.3.2"
 objc2-service-management = { version = "0.3.2", features = ["SMAppService"] }
 block2 = "0.6.2"
-core-graphics-types = "0.1.3"
+
+[patch.'https://github.com/anomalyco/rune']
+# Vendored rune (see vendor/rune/README-mojito.md): smaller text and image
+# atlas pages, everything else identical to rev 092dec2.
+rune = { path = "vendor/rune/crates/rune" }
+rune-kit = { path = "vendor/rune/crates/rune-kit" }
+rune-theme-opencode = { path = "vendor/rune/themes/opencode" }
+rune-motion = { path = "vendor/rune/crates/rune-motion" }
+rune-staging = { path = "vendor/rune/crates/rune-staging" }
+procwatch = { path = "vendor/rune/crates/procwatch" }
+rune-mermaid = { path = "vendor/rune/crates/rune-mermaid" }
 
 [profile.release]
 strip = true

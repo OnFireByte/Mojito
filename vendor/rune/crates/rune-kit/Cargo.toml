@@ -1,0 +1,53 @@
+[package]
+name = "rune-kit"
+version = "0.0.1"
+edition = "2024"
+license = "MIT"
+description = "Generic, themable components for Rune. Components read only semantic tokens (`Kit`); a theme crate supplies them."
+
+[dependencies]
+rune = { path = "../rune", default-features = false }
+rune-mermaid = { path = "../rune-mermaid", optional = true }
+rune-motion = { path = "../rune-motion" }
+unicode-segmentation = "1.13"
+pulldown-cmark = { version = "0.13", default-features = false, optional = true }
+
+[features]
+# `Markdown` and `MarkdownStyle`.
+markdown = ["dep:pulldown-cmark"]
+# Native ```mermaid diagrams in `Markdown` (flowcharts, sequence and state diagrams), and `mermaid`.
+mermaid = ["markdown", "dep:rune-mermaid"]
+# Phase timings for the headless benches (`markdown_resize`).
+frame-profile = ["rune/frame-profile"]
+
+[[example]]
+name = "scroll_x"
+required-features = ["markdown"]
+
+[[example]]
+name = "markdown_resize"
+required-features = ["markdown", "frame-profile"]
+
+[[example]]
+name = "scroll_bench"
+required-features = ["markdown", "frame-profile"]
+
+[[example]]
+name = "layout_text_cost"
+required-features = ["markdown", "frame-profile"]
+
+[dev-dependencies]
+procwatch = { path = "../procwatch" }
+# Reference rasteriser for the built-in glyphs (tests/glyphs.rs).
+resvg = { version = "0.45", default-features = false }
+# The fixture goldens render with the OpenCode theme's tokens and fonts (tests/markdown_fixture.rs).
+rune-theme-opencode = { path = "../../themes/opencode" }
+
+[[test]]
+name = "markdown_fixture"
+required-features = ["markdown", "mermaid"]
+
+[[test]]
+name = "markdown_diagram_stream"
+required-features = ["markdown", "mermaid"]
+
