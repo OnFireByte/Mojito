@@ -39,7 +39,12 @@ fn main() {
     let index = AppIndexHandle::new();
     let (ui_tx, ui_rx) = mpsc::sync_channel::<UiMsg>(UI_CHANNEL_BOUND);
     let (jobs_tx, jobs_rx) = mpsc::sync_channel::<Job>(JOB_CHANNEL_BOUND);
-    let engine = Engine::new(store.handle(), index.handle(), ui_tx, jobs_tx);
+    let engine = Engine::new(
+        store.handle(),
+        index.handle(),
+        ui_tx.clone(),
+        jobs_tx.clone(),
+    );
     let (menu_tx, menu_rx) = mpsc::sync_channel::<status_item::MenuAction>(8);
 
     rune::run_windows_with(RunOptions { accessory: true }, move |displays| {
@@ -107,6 +112,8 @@ fn main() {
         };
         if let Err(error) = taps::spawn(taps::TapDeps {
             engine,
+            ui: ui_tx,
+            jobs: jobs_tx,
             ui_wake,
             job_wake,
         }) {
@@ -295,9 +302,13 @@ fn pump_menu(
                         if let Err(error) = CapsMap.uninstall() {
                             eprintln!("mojito: caps restore: {error}");
                         }
+                        taps::stop();
                         tx.quit();
                     }
-                    status_item::MenuAction::Quit => tx.quit(),
+                    status_item::MenuAction::Quit => {
+                        taps::stop();
+                        tx.quit();
+                    }
                 });
             }
         })

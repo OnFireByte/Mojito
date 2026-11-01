@@ -250,21 +250,6 @@ fn contains_pair(existing: &str, ours: (u64, u64)) -> bool {
     })
 }
 
-/// Report the current entries; used by diagnostics.
-#[allow(dead_code)]
-fn entries_now() -> Result<Vec<MappingEntry>, String> {
-    let text = hidutil_get()?;
-    Ok(entries_from(&text)?
-        .into_iter()
-        .filter_map(|entry| {
-            Some(MappingEntry {
-                src: entry_src(&entry)?,
-                dst: entry_dst(&entry)?,
-            })
-        })
-        .collect())
-}
-
 /// The current user id, for `launchctl bootstrap gui/<uid>`.
 fn current_uid() -> u32 {
     // SAFETY: `getuid` has no failure mode and no preconditions.
