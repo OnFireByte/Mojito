@@ -25,12 +25,13 @@ const AGENT_LABEL: &str = "com.mojito.caps";
 
 impl CapsMap {
     /// Merge our entry into the existing UserKeyMapping and set it. Idempotent.
+    /// An absent mapping (a fresh machine prints `(null)`) is an empty slate;
+    /// a mapping that exists but fails to parse stays an error so foreign
+    /// entries are never clobbered.
     pub fn install(&self) -> Result<(), String> {
-        let ours = (CAPS_USAGE.0 as u64, F18_USAGE.0 as u64);
-        let current = hidutil_get()?;
-        let merged = merge_mapping(&current, ours)?;
+        let merged = merged_or_current()?;
         hidutil_set(&merged)?;
-        if !contains_pair(&hidutil_get()?, ours) {
+        if !contains_pair(&hidutil_get()?, our_pair()) {
             return Err("hidutil did not accept the Caps Lock remap".into());
         }
         Ok(())
@@ -41,8 +42,10 @@ impl CapsMap {
     /// else TO F18 survives.
     pub fn uninstall(&self) -> Result<(), String> {
         let current = hidutil_get()?;
-        let remaining = without_entry(&current, CAPS_USAGE.0 as u64)?;
-        hidutil_set(&remaining)?;
+        if !absent_mapping(&current) {
+            let remaining = without_entry(&current, CAPS_USAGE.0)?;
+            hidutil_set(&remaining)?;
+        }
         bootout_agent();
         delete_plist();
         Ok(())
@@ -51,7 +54,7 @@ impl CapsMap {
     /// True when the current UserKeyMapping contains our caps->F18 pair.
     pub fn is_active(&self) -> bool {
         match hidutil_get() {
-            Ok(current) => contains_pair(&current, (CAPS_USAGE.0 as u64, F18_USAGE.0 as u64)),
+            Ok(current) => contains_pair(&current, our_pair()),
             Err(_) => false,
         }
     }
@@ -72,7 +75,7 @@ impl CapsMap {
             std::fs::create_dir_all(parent)
                 .map_err(|error| format!("could not create LaunchAgents: {error}"))?;
         }
-        let mapping = merged_or_current();
+        let mapping = merged_or_current()?;
         let payload = plist_xml(&mapping);
         std::fs::write(&plist, payload)
             .map_err(|error| format!("could not write {}: {error}", plist.display()))?;
@@ -98,13 +101,23 @@ impl CapsMap {
     }
 }
 
-/// The merged UserKeyMapping as of now, falling back to our pair alone when
-/// hidutil is unreadable (a fresh machine has an empty mapping anyway).
-fn merged_or_current() -> String {
-    match hidutil_get() {
-        Ok(current) => merge_mapping(&current, our_pair()).unwrap_or_else(|_| our_pair_alone()),
-        Err(_) => our_pair_alone(),
+/// True when hidutil reports no UserKeyMapping at all: a fresh machine
+/// prints the property's `(null)` placeholder, which is an empty slate,
+/// not an error.
+fn absent_mapping(text: &str) -> bool {
+    let trimmed = text.trim();
+    trimmed.is_empty() || !trimmed.contains('[')
+}
+
+/// The merged UserKeyMapping as of now. A genuinely absent mapping is an
+/// empty slate; a mapping that fails to parse stays an error so foreign
+/// entries are never clobbered.
+fn merged_or_current() -> Result<String, String> {
+    let current = hidutil_get()?;
+    if absent_mapping(&current) {
+        return Ok(our_pair_alone());
     }
+    merge_mapping(&current, our_pair())
 }
 
 fn our_pair_alone() -> String {
@@ -112,7 +125,7 @@ fn our_pair_alone() -> String {
 }
 
 fn our_pair() -> (u64, u64) {
-    (CAPS_USAGE.0 as u64, F18_USAGE.0 as u64)
+    (CAPS_USAGE.0, F18_USAGE.0)
 }
 
 /// `hidutil property --get UserKeyMapping`.
@@ -312,7 +325,20 @@ fn delete_plist() {
 mod tests {
     use super::*;
 
-    const OURS: (u64, u64) = (0x7000_0039, 0x7000_006D);
+    // The real TN2450 encoding: (usage_page << 32) | usage.
+    const OURS: (u64, u64) = (0x7_0000_0039, 0x7_0000_006D);
+
+    /// The on-device discovery that forced this fix: a fresh machine prints
+    /// `(null)`, and treating that as an error made the first install a
+    /// silent no-op.
+    #[test]
+    fn absent_hidutil_output_is_an_empty_slate() {
+        assert!(absent_mapping("(null)\n"));
+        assert!(absent_mapping("  "));
+        assert!(!absent_mapping(
+            "(\"UserKeyMapping\") = [{\"HIDKeyboardModifierMappingSrc\":30064771129}]"
+        ));
+    }
 
     #[test]
     fn merge_installs_ours_into_an_empty_mapping() {
