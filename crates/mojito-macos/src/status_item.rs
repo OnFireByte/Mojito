@@ -128,6 +128,29 @@ pub fn set_needs_attention(flag: bool) {
     });
 }
 
+/// True when another process of this bundle is already running; activates
+/// it so the user lands somewhere visible. Two live instances would both
+/// intercept keys and fight over the overlay.
+pub fn activate_existing() -> bool {
+    use objc2_app_kit::{NSApplicationActivationOptions, NSRunningApplication};
+    use objc2_foundation::NSString;
+    let apps = NSRunningApplication::runningApplicationsWithBundleIdentifier(
+        &NSString::from_str("com.mojito.app"),
+    );
+    let own = std::process::id() as i32;
+    let other = apps
+        .to_vec()
+        .into_iter()
+        .find(|app| app.processIdentifier() != own && !app.isTerminated());
+    match other {
+        Some(existing) => {
+            let _ = existing.activateWithOptions(NSApplicationActivationOptions::empty());
+            true
+        }
+        None => false,
+    }
+}
+
 fn add_item(
     menu: &NSMenu,
     target: &MenuTarget,

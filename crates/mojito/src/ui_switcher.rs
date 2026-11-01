@@ -5,8 +5,8 @@
 
 use rune::tok::type_;
 use rune::{
-    Color, Cx, El, KeyPolicy, OverlayHandle, OverlayInput, OverlayOptions, OverlaySpec, Shadow,
-    SystemMaterial, TextStyle, col, el, row, text,
+    Color, Cx, El, KeyPolicy, OverlayHandle, OverlayInput, OverlayOptions, OverlaySpec, Pixels,
+    Shadow, SystemMaterial, TextStyle, col, el, row, text,
 };
 use rune::{ConfiguredOverlay, DisplayTarget};
 
@@ -26,11 +26,13 @@ pub enum Mode {
 }
 
 /// Display-ready row: badges are pre-resolved to glyphs on the main thread,
-/// so the view stays pure.
+/// and the app icon arrives as a fillable pixel buffer (monogram when the
+/// icon is missing), so the view stays pure.
 pub struct Row {
     pub badge: Option<char>,
     pub name: String,
     pub windows: Option<u8>,
+    pub icon: Pixels,
 }
 
 #[derive(Clone, Copy)]
@@ -208,7 +210,7 @@ fn row_view(i: usize, r: &Row, t: SwitchTheme, accent: rune::Color) -> El {
         // keys are the whole selection model.
         .on_hover(|_: &mut Switcher| {})
         .child(badge(r, t, accent))
-        .child(monogram(r, accent))
+        .child(app_tile(r, accent))
         .child(
             el().key("name").grow(1.0).min_w(0.0).child(
                 text(r.name.clone())
@@ -238,6 +240,19 @@ fn badge(r: &Row, t: SwitchTheme, accent: rune::Color) -> El {
                 .font(type_::MONO_CAPTION.mono())
                 .color(accent),
         )
+}
+
+/// App icon tile; a monogram stands in until the icon bytes arrive.
+fn app_tile(r: &Row, accent: rune::Color) -> El {
+    if r.icon.size().0 > 0 {
+        return el()
+            .key("icon")
+            .size(28.0, 28.0)
+            .radius(8.0)
+            .continuous_corners()
+            .pixels(&r.icon);
+    }
+    monogram(r, accent)
 }
 
 /// Monogram tile in place of an app icon (icons are a fast-follow).

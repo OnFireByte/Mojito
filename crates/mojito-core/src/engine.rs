@@ -481,6 +481,7 @@ impl Engine {
                 key: app.key,
                 name: app.name.clone(),
                 glyph: crate::key::glyph(app.key),
+                bundle_id: app.bundle_id.clone(),
             })
             .collect();
         self.phase = Phase::Overlay {

@@ -119,7 +119,9 @@ fn sidebar(s: &SettingsState, p: Paint) -> El {
         .role("navigation")
         .w(220.0)
         .h_full()
-        .pt(12.0)
+        // macOS draws the traffic lights over a borderless window's top-left;
+        // keep the first nav row below them.
+        .pt(30.0)
         .pb(16.0)
         .pl(10.0)
         .pr(6.0)

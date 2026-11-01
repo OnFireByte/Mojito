@@ -70,6 +70,10 @@ fn main() {
         None => {}
     }
     warn_unbundled();
+    if status_item::activate_existing() {
+        eprintln!("mojito: already running; activated the existing instance");
+        return;
+    }
     rune::prewarm_gpu();
 
     let store = Arc::new(ConfigStore::open(settings_path()));
@@ -164,6 +168,7 @@ fn main() {
             store: Some(store),
             index: Some(index),
             displays,
+            icons: std::collections::HashMap::new(),
         });
         vec![WindowSpec::from_app("hub", app)]
     });
@@ -178,6 +183,25 @@ struct Hub {
     store: Option<Arc<ConfigStore>>,
     index: Option<AppIndexHandle>,
     displays: Vec<Display>,
+    /// App icon pixel buffers keyed by bundle id, filled once per app.
+    icons: std::collections::HashMap<String, rune::Pixels>,
+}
+
+impl Hub {
+    /// The icon buffer for a bundle id, filled on first use; the empty
+    /// Pixels renders as the row's monogram until bytes arrive.
+    fn icon_for(&mut self, bundle: &str) -> rune::Pixels {
+        self.icons
+            .entry(bundle.to_string())
+            .or_insert_with(|| {
+                let pixels = rune::Pixels::new();
+                if let Some(rgba) = mojito_macos::icons::app_icon_rgba(bundle, 32) {
+                    pixels.set(32, 32, rgba);
+                }
+                pixels
+            })
+            .clone()
+    }
 }
 
 struct Display {
@@ -198,6 +222,7 @@ impl Default for Hub {
             store: None,
             index: None,
             displays: Vec::new(),
+            icons: std::collections::HashMap::new(),
         }
     }
 }
@@ -206,7 +231,7 @@ impl Default for Hub {
 /// tap thread's wakers ask for; returning false keeps an idle loop at zero
 /// draws.
 fn hub_poll(s: &mut Hub, _: f64, _: &mut Tx) -> bool {
-    let Some(overlay) = s.overlay.as_ref() else {
+    let Some(overlay) = s.overlay.clone() else {
         return false;
     };
     let mut acted = false;
@@ -220,21 +245,26 @@ fn hub_poll(s: &mut Hub, _: f64, _: &mut Tx) -> bool {
                         badge: layout::glyph(r.key).or(Some(r.glyph)),
                         name: r.name.clone(),
                         windows: None,
+                        icon: s.icon_for(&r.bundle_id),
                     })
                     .collect();
-                reveal(overlay, s, ui_switcher::Mode::Pinned, rows);
+                reveal(&overlay, s, ui_switcher::Mode::Pinned, rows);
             }
             UiMsg::ShowLive { rows } => {
                 eprintln!("mojito: live rows: {}", rows.len()); // TEMP diagnosis
                 let rows = rows
                     .iter()
-                    .map(|r| ui_switcher::Row {
-                        badge: r.label.and_then(layout::glyph),
-                        name: r.name.clone(),
-                        windows: Some(r.windows),
+                    .map(|r| {
+                        let bundle = r.bundle.clone().unwrap_or_else(|| r.pid.to_string());
+                        ui_switcher::Row {
+                            badge: r.label.and_then(layout::glyph),
+                            name: r.name.clone(),
+                            windows: Some(r.windows),
+                            icon: s.icon_for(&bundle),
+                        }
                     })
                     .collect();
-                reveal(overlay, s, ui_switcher::Mode::Live, rows);
+                reveal(&overlay, s, ui_switcher::Mode::Live, rows);
             }
             UiMsg::Hide => overlay.hide(),
             UiMsg::HideFade => {

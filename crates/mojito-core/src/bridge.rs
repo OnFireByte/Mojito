@@ -9,6 +9,7 @@ pub struct PinnedRow {
     pub key: PhysicalKey,
     pub name: String,
     pub glyph: char,
+    pub bundle_id: String,
 }
 
 /// Frozen when Live mode is entered; never mutated during the hold, so

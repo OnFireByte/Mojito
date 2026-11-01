@@ -3,6 +3,7 @@
 
 pub mod caps;
 pub mod cursor;
+pub mod icons;
 pub mod index;
 pub mod layout;
 pub mod permission;

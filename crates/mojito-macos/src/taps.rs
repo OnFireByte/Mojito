@@ -400,6 +400,7 @@ fn apply(state: &mut TapState, action: Action) {
         Action::Pass | Action::Swallow => {}
         Action::Synth(key) => post(&key),
         Action::Ui(msg) => {
+            eprintln!("mojito: ui {msg:?}"); // TEMP diagnosis
             if state.ui.as_ref().is_some_and(|tx| tx.try_send(msg).is_ok())
                 && let Some(wake) = state.ui_wake.as_ref()
             {
