@@ -355,8 +355,16 @@ fn arm_permission_wait(
     std::thread::Builder::new()
         .name("mojito-permwait".into())
         .spawn(move || {
+            let mut polls = 0u32;
             while permission::state() == permission::PermissionState::NeedsGrant {
                 std::thread::sleep(Duration::from_millis(250));
+                polls += 1;
+                if polls == 60 {
+                    // Still untrusted 15 s after prompting: the grant is
+                    // likely stale from a previous ad-hoc rebuild, and macOS
+                    // will not prompt again on its own. Surface it.
+                    status_item::set_needs_attention(true);
+                }
             }
             if let Err(error) = start_taps(store, index, ui_tx, jobs_tx, &hub) {
                 eprintln!("mojito: taps after grant: {error}");
