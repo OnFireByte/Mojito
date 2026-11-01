@@ -173,6 +173,7 @@ impl SettingsState {
 
 /// Runs when the status item opens the window (right after `open`).
 pub fn opened(s: &mut SettingsState, tx: &mut Tx) {
+    eprintln!("mojito: settings window live"); // TEMP diagnosis
     s.reload();
     s.live_refresh = true;
     tx.wake_after(REFRESH_AFTER);

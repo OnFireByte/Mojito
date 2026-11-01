@@ -113,8 +113,10 @@ fn main() {
         });
 
         let settings_app = App::new(app_spec::settings_spec())
-            // Deferred creation: the window opens only from the status item.
+            // The window materializes on the first open; until then the app
+            // owns no surface and no atlas.
             .windowless()
+            .window_options(app_spec::settings_window_options())
             .standard_menus()
             .on_close(ui_settings::closed)
             .init({
@@ -122,10 +124,7 @@ fn main() {
                 let hub = hub.clone();
                 move || SettingsState::new(store, hub)
             });
-        let (settings, _settings_window) = app.window(
-            WindowSpec::from_app("settings", settings_app)
-                .configured_options(app_spec::settings_window_options()),
-        );
+        let settings = settings_app.handle();
 
         index.start();
         layout::snapshot();
