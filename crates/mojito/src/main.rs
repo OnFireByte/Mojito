@@ -66,6 +66,10 @@ fn main() {
             mojito_macos::index::debug_windows();
             return;
         }
+        Some("taps") => {
+            mojito_macos::index::debug_taps();
+            return;
+        }
         Some(other) => {
             eprintln!("unknown verb {other}; verbs: switch, key, windows");
             return;

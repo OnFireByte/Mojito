@@ -264,8 +264,70 @@ fn dict_number(dict: &CFDictionary, key: &str) -> Option<i64> {
     unsafe { &*(value as *const CFNumber) }.as_i64()
 }
 
-/// Debug: every on-screen window owned by this app, with its alpha, so the
-/// overlay's shown/hidden state can be read from outside the process.
+/// Debug: every event tap installed on the system, with its pid, tap point,
+/// and mask, so a tap that eats keys before ours can be named.
+/// `CGGetEventTapList`.
+pub fn debug_taps() {
+    const MAX: usize = 64;
+    /// Mirrors `CGEventTapInformation` (CoreGraphics CGEventTypes.h); the
+    /// field order is ABI.
+    #[repr(C)]
+    #[derive(Clone, Copy)]
+    struct TapInfo {
+        event_tap_id: u32,
+        tap_point: u32,
+        options: u32,
+        event_mask: u64,
+        tapping_process: i32,
+        process_being_tapped: i32,
+        enabled: u8,
+        min_latency: f32,
+        avg_latency: f32,
+        max_latency: f32,
+    }
+    #[link(name = "CoreGraphics", kind = "framework")]
+    unsafe extern "C" {
+        fn CGGetEventTapList(max_taps: u32, taps: *mut TapInfo, count: *mut u32) -> i32;
+    }
+    let points = ["HID", "session", "annotated session"];
+    // SAFETY: the array is filled by CoreGraphics up to `count`.
+    unsafe {
+        let mut taps = [std::mem::zeroed::<TapInfo>(); MAX];
+        let mut count: u32 = 0;
+        if CGGetEventTapList(MAX as u32, taps.as_mut_ptr(), &mut count) != 0 {
+            println!("CGGetEventTapList failed");
+            return;
+        }
+        for tap in &taps[..count.min(MAX as u32) as usize] {
+            let owner = if tap.tapping_process == 0 {
+                "kernel".to_string()
+            } else {
+                process_name(tap.tapping_process)
+            };
+            let point = points.get(tap.tap_point as usize).copied().unwrap_or("?");
+            let kind = if tap.options == 0 { "filter" } else { "listen" };
+            println!(
+                "pid {} ({}) {} {} mask {:#x} enabled {}",
+                tap.tapping_process, owner, point, kind, tap.event_mask, tap.enabled
+            );
+        }
+    }
+}
+
+/// The process name for a pid via libproc; "(unknown)" when it is gone.
+fn process_name(pid: i32) -> String {
+    // libproc_name lives in libSystem, which is always auto-linked.
+    unsafe extern "C" {
+        fn proc_name(pid: i32, buffer: *mut c_void, size: u32) -> isize;
+    }
+    let mut buffer = [0_u8; 128];
+    // SAFETY: the buffer outlives the call.
+    let length = unsafe { proc_name(pid, buffer.as_mut_ptr().cast(), buffer.len() as u32) };
+    if length <= 0 {
+        return "(unknown)".into();
+    }
+    String::from_utf8_lossy(&buffer[..length as usize]).into_owned()
+}
 pub fn debug_windows() {
     // SAFETY: CoreGraphics returns a +1 CFArray of CFDictionary window info.
     let list = unsafe { CGWindowListCopyWindowInfo(ON_SCREEN_ONLY, 0) };
