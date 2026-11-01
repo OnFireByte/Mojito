@@ -4,7 +4,9 @@
 /// CGEvent virtual keycode: the physical position of a key, stable across
 /// keyboard layouts and input languages. Built only from CGEvents (backend)
 /// or config parsing (boundary), never from a character.
-#[derive(Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Debug)]
+#[derive(
+    Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Debug, serde::Serialize, serde::Deserialize,
+)]
 pub struct PhysicalKey(pub u16);
 
 /// HID usage id in the keyboard page (the hidutil numbering space).
@@ -48,14 +50,117 @@ pub const ARROW_LEFT: PhysicalKey = PhysicalKey(0x7B);
 pub const ARROW_RIGHT: PhysicalKey = PhysicalKey(0x7C);
 pub const ARROW_DOWN: PhysicalKey = PhysicalKey(0x7D);
 pub const ARROW_UP: PhysicalKey = PhysicalKey(0x7E);
+pub const M: PhysicalKey = PhysicalKey(0x2E);
 
 /// HID usages for the hidutil remap (keyboard page, 0x700000xx).
 pub const CAPS_USAGE: HidUsage = HidUsage(0x7000_0039);
 pub const F18_USAGE: HidUsage = HidUsage(0x7000_006D);
 
 /// US-ANSI position to glyph, for badges and labels only. Never used to
-/// interpret a keystroke.
+/// interpret a keystroke. Positions without a printable glyph (F-keys,
+/// modifiers) get the neutral middle dot; the platform backend overlays the
+/// real layout glyph where it has one.
 pub fn glyph(key: PhysicalKey) -> char {
-    let _ = key;
-    todo!("key.rs glyph table")
+    match key.0 {
+        0x00 => 'A',
+        0x01 => 'S',
+        0x02 => 'D',
+        0x03 => 'F',
+        0x04 => 'H',
+        0x05 => 'G',
+        0x06 => 'Z',
+        0x07 => 'X',
+        0x08 => 'C',
+        0x09 => 'V',
+        0x0A => '§',
+        0x0B => 'B',
+        0x0C => 'Q',
+        0x0D => 'W',
+        0x0E => 'E',
+        0x0F => 'R',
+        0x10 => 'Y',
+        0x11 => 'T',
+        0x12 => '1',
+        0x13 => '2',
+        0x14 => '3',
+        0x15 => '4',
+        0x16 => '6',
+        0x17 => '5',
+        0x18 => '=',
+        0x19 => '9',
+        0x1A => '7',
+        0x1B => '-',
+        0x1C => '8',
+        0x1D => '0',
+        0x1E => ']',
+        0x1F => 'O',
+        0x20 => 'U',
+        0x21 => '[',
+        0x22 => 'I',
+        0x23 => 'P',
+        0x24 => '⏎',
+        0x25 => 'L',
+        0x26 => 'J',
+        0x27 => '\'',
+        0x28 => 'K',
+        0x29 => ';',
+        0x2A => '\\',
+        0x2B => ',',
+        0x2C => '/',
+        0x2D => 'N',
+        0x2E => 'M',
+        0x2F => '.',
+        0x30 => '⇥',
+        0x31 => '␣',
+        0x32 => '`',
+        0x33 => '⌫',
+        0x35 => '⎋',
+        0x39 => '⇪',
+        0x41 => '.',
+        0x43 => '*',
+        0x45 => '+',
+        0x47 => '⌧',
+        0x4B => '/',
+        0x4C => '⏎',
+        0x4E => '-',
+        0x51 => '=',
+        0x53..=0x5C => char::from(b'0' + (key.0 - 0x53) as u8),
+        0x7B => '←',
+        0x7C => '→',
+        0x7D => '↓',
+        0x7E => '↑',
+        _ => '·',
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The trap the architecture doc warns about: keycode 0x4F and HID usage
+    /// 0x7000006D both name F18, in different spaces.
+    #[test]
+    fn keycode_spaces_are_distinct_and_golden() {
+        assert_eq!(F18, PhysicalKey(0x4F));
+        assert_eq!(CAPS, PhysicalKey(0x39));
+        assert_eq!(F18_USAGE, HidUsage(0x7000_006D));
+        assert_eq!(CAPS_USAGE, HidUsage(0x7000_0039));
+        assert_ne!(F18.0 as u32, F18_USAGE.0);
+        assert_ne!(CAPS.0 as u32, CAPS_USAGE.0);
+    }
+
+    #[test]
+    fn glyphs_follow_us_ansi_positions() {
+        assert_eq!(glyph(PhysicalKey(0x00)), 'A');
+        assert_eq!(glyph(PhysicalKey(0x04)), 'H');
+        assert_eq!(glyph(PhysicalKey(0x2E)), 'M');
+        assert_eq!(glyph(PhysicalKey(0x12)), '1');
+        assert_eq!(glyph(PhysicalKey(0x1D)), '0');
+        assert_eq!(glyph(PhysicalKey(0x29)), ';');
+        assert_eq!(glyph(PhysicalKey(0x31)), '␣');
+        assert_eq!(glyph(ARROW_LEFT), '←');
+        assert_eq!(glyph(ARROW_UP), '↑');
+        // F18 has no printable US-ANSI glyph; the table stays total.
+        assert_eq!(glyph(F18), '·');
+    }
 }
