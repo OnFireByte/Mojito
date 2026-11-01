@@ -2,14 +2,13 @@
 //! decisions and actions. Runs inline in the tap callback; never does I/O and
 //! never blocks.
 
-use crate::bridge::{Job, UiMsg};
-use crate::key::{PhysicalKey, ModifierFlags, ARROW_DOWN, ARROW_LEFT, ARROW_RIGHT, ARROW_UP, BACKSPACE, ESC, F18, RETURN};
+use crate::bridge::{AppRef, Job, LiveModel, LiveRow, PinnedRow, SwitchRequest, UiMsg};
+use crate::config::Config;
+use crate::key::{ESC, F18, ModifierFlags, PhysicalKey};
+use crate::labels::LabelMemory;
+use crate::tables::{Chord, Tables, build_tables};
 use arc_swap::ArcSwap;
 use std::sync::Arc;
-
-use crate::config::Config;
-use crate::labels::LabelMemory;
-use crate::tables::Tables;
 
 /// Monotonic nanoseconds, read by the backend at callback entry and injected
 /// here so the machine stays pure and time-travel-testable.
@@ -34,7 +33,7 @@ pub struct RawKey {
 
 /// A synthesized key event. Down and up are explicit; `flags` carries the
 /// triggering event's real modifier flags so meta+shift+h yields shift+Left.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub struct SynthKey {
     pub key: PhysicalKey,
     pub down: bool,
@@ -43,7 +42,7 @@ pub struct SynthKey {
 
 /// The engine's whole output. Pass/Swallow decide the event's fate; the rest
 /// execute. Invariant: `on_event` never does I/O and never blocks.
-#[derive(Debug)]
+#[derive(Debug, PartialEq)]
 pub enum Action {
     Pass,
     Swallow,
@@ -57,35 +56,64 @@ pub enum Action {
 #[derive(Debug)]
 enum Phase {
     Idle,
-    Armed { down_at: Mono, used: bool },
+    Armed {
+        down_at: Mono,
+        used: bool,
+    },
     /// `committed` makes the rest of the hold inert after a switch, so
     /// leftover autorepeats never type into the app we just landed on.
-    Meta { overlay: OverlayPhase, committed: bool },
+    Meta {
+        overlay: OverlayPhase,
+        committed: bool,
+    },
 }
 
 #[derive(Debug)]
 enum OverlayPhase {
     Hidden,
     Pinned,
-    Live(Box<crate::bridge::LiveModel>),
+    Live(Box<LiveModel>),
 }
 
 /// Per-hold decision memory for each physical key: down decides, up obeys.
+/// `Synth` records which key a synthesized down opened, so its up (and its
+/// autorepeats) close the same key even after release, reset of the overlay,
+/// or a mode toggle in between.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum Route {
     Undecided,
     Pass,
     Swallow,
+    Synth(PhysicalKey),
 }
+
+/// The layer a key decision happens in: which table (or frozen label list)
+/// answers "what does this key mean right now".
+enum Layer {
+    Hidden,
+    Pinned,
+    Live(Arc<[LiveRow]>),
+}
+
+/// Flags that turn a key into a system chord: such keys pass through a hold
+/// untouched (cmd+tab survives meta), never route.
+const CHORD: ModifierFlags =
+    ModifierFlags(ModifierFlags::CMD.0 | ModifierFlags::CTRL.0 | ModifierFlags::OPT.0);
 
 pub struct Engine {
     phase: Phase,
     config: Arc<ArcSwap<Config>>,
     tables: Tables,
+    tables_version: u64,
     index: Arc<ArcSwap<crate::bridge::AppIndex>>,
     route: [Route; 256],
     memory: LabelMemory,
+    // The engine's output crosses to the UI and main thread inside the
+    // returned `Vec<Action>`; the tap callback routes Ui/Job variants over
+    // these channels itself, so the engine never sends on them.
+    #[allow(dead_code)]
     ui: std::sync::mpsc::SyncSender<UiMsg>,
+    #[allow(dead_code)]
     jobs: std::sync::mpsc::SyncSender<Job>,
 }
 
@@ -98,8 +126,21 @@ impl Engine {
         ui: std::sync::mpsc::SyncSender<UiMsg>,
         jobs: std::sync::mpsc::SyncSender<Job>,
     ) -> Self {
-        let _ = (config, index, ui, jobs);
-        todo!("Engine::new")
+        let config_snapshot = config.load_full();
+        let tables = build_tables(&config_snapshot);
+        let tables_version = config_snapshot.version;
+        let memory = config_snapshot.label_memory.clone();
+        Engine {
+            phase: Phase::Idle,
+            config,
+            tables,
+            tables_version,
+            index,
+            route: [Route::Undecided; 256],
+            memory,
+            ui,
+            jobs,
+        }
     }
 
     /// The single decision point. Invariants:
@@ -113,18 +154,353 @@ impl Engine {
     /// - Autorepeat of a routed key re-synthesizes.
     /// - Any reset returns to Idle, clears routes, and hides the overlay.
     pub fn on_event(&mut self, ev: RawKey) -> Vec<Action> {
-        let _ = (&ev, &self.phase, F18, ESC, RETURN, BACKSPACE, ARROW_LEFT, ARROW_RIGHT, ARROW_DOWN, ARROW_UP);
-        todo!("engine state machine")
+        self.refresh_tables();
+        if ev.key == F18 {
+            return self.on_f18(ev);
+        }
+        let ix = ev.key.0 as usize;
+        if ix >= self.route.len() {
+            return vec![Action::Pass]; // outside the routable key space: stay transparent
+        }
+        let committed = matches!(
+            &self.phase,
+            Phase::Meta {
+                committed: true,
+                ..
+            }
+        );
+        let actions = if ev.down && !ev.repeat {
+            match &self.phase {
+                Phase::Idle => {
+                    self.route[ix] = Route::Pass;
+                    vec![Action::Pass]
+                }
+                _ => self.decide_down(ev, ix),
+            }
+        } else if ev.down {
+            self.obey_repeat(ev, ix, committed)
+        } else {
+            self.decide_up(ev, ix, committed)
+        };
+        if let Phase::Armed { used, .. } = &mut self.phase {
+            *used = true;
+        }
+        actions
     }
 
     /// Health-timer and wake-from-sleep recovery: back to Idle, overlay hidden.
     pub fn reset(&mut self) -> Vec<Action> {
-        todo!("reset")
+        self.phase = Phase::Idle;
+        self.route = [Route::Undecided; 256];
+        vec![Action::Ui(UiMsg::Hide)]
     }
 
     /// Rebuild binding tables when the config version changes; called by
     /// `on_event` lazily so settings edits apply on the next gesture.
     fn refresh_tables(&mut self) {
-        todo!("tables refresh")
+        let config = self.config.load_full();
+        if config.version != self.tables_version {
+            self.tables = build_tables(&config);
+            self.tables_version = config.version;
+        }
+    }
+
+    fn on_f18(&mut self, ev: RawKey) -> Vec<Action> {
+        if ev.down {
+            match &self.phase {
+                // Re-arm on a second down: tolerates duplicate evidence from
+                // the HID tap and gestures whose up a hotkey consumed.
+                Phase::Idle | Phase::Armed { .. } => {
+                    self.phase = Phase::Armed {
+                        down_at: ev.t,
+                        used: false,
+                    };
+                }
+                // A down during an active hold is duplicate evidence only.
+                Phase::Meta { .. } => {}
+            }
+            return vec![Action::Swallow];
+        }
+        let mut actions = vec![Action::Swallow];
+        match &self.phase {
+            Phase::Idle => {}
+            Phase::Armed { down_at, used } => {
+                let tap_max = self.config.load_full().tap_max_ms as u64;
+                if !*used && ev.t.ms_since(*down_at) <= tap_max {
+                    actions.push(Action::Synth(SynthKey {
+                        key: ESC,
+                        down: true,
+                        flags: ModifierFlags::NONE,
+                    }));
+                    actions.push(Action::Synth(SynthKey {
+                        key: ESC,
+                        down: false,
+                        flags: ModifierFlags::NONE,
+                    }));
+                }
+            }
+            Phase::Meta { overlay, .. } => {
+                if !matches!(overlay, OverlayPhase::Hidden) {
+                    actions.push(Action::Ui(UiMsg::Hide));
+                }
+            }
+        }
+        self.phase = Phase::Idle;
+        actions
+    }
+
+    /// Which layer answers key decisions, and whether the hold is committed.
+    fn hold_state(&self) -> (Layer, bool) {
+        match &self.phase {
+            Phase::Armed { .. } => (Layer::Hidden, false),
+            Phase::Meta { overlay, committed } => (
+                match overlay {
+                    OverlayPhase::Hidden => Layer::Hidden,
+                    OverlayPhase::Pinned => Layer::Pinned,
+                    OverlayPhase::Live(model) => Layer::Live(model.rows.clone()),
+                },
+                *committed,
+            ),
+            Phase::Idle => (Layer::Hidden, false),
+        }
+    }
+
+    /// A fresh (non-repeat) down during a hold. Chords pass and mark used;
+    /// everything else routes through the layer's table.
+    fn decide_down(&mut self, ev: RawKey, ix: usize) -> Vec<Action> {
+        if ev.flags.intersects(CHORD) {
+            self.route[ix] = Route::Pass;
+            return vec![Action::Pass];
+        }
+        let (layer, committed) = self.hold_state();
+        if committed {
+            self.route[ix] = Route::Swallow;
+            return vec![Action::Swallow];
+        }
+        match layer {
+            Layer::Hidden => match self.tables.hidden.get(ix).copied().flatten() {
+                Some(Chord::Synth(sk)) => {
+                    self.route[ix] = Route::Synth(sk.key);
+                    self.engage(OverlayPhase::Hidden);
+                    vec![
+                        Action::Swallow,
+                        Action::Synth(SynthKey {
+                            key: sk.key,
+                            down: true,
+                            flags: ev.flags.keep_only_shift(),
+                        }),
+                    ]
+                }
+                Some(Chord::CycleInput) if !ev.repeat => {
+                    self.route[ix] = Route::Swallow;
+                    self.engage(OverlayPhase::Hidden);
+                    vec![Action::Swallow, Action::Job(Job::CycleInputSource)]
+                }
+                Some(Chord::OpenPinned) if !ev.repeat => {
+                    self.route[ix] = Route::Swallow;
+                    self.enter_pinned()
+                }
+                _ => {
+                    self.route[ix] = Route::Swallow;
+                    vec![Action::Swallow]
+                }
+            },
+            Layer::Pinned => match self.tables.pinned.get(ix).copied().flatten() {
+                Some(Chord::TriggerPin(pin)) => {
+                    let config = self.config.load_full();
+                    match config.pinned.get(pin as usize) {
+                        Some(app) => self.commit(ix, AppRef::Bundle(app.bundle_id.clone())),
+                        None => {
+                            self.route[ix] = Route::Swallow;
+                            vec![Action::Swallow]
+                        }
+                    }
+                }
+                Some(Chord::ToggleMode) if !ev.repeat => {
+                    self.route[ix] = Route::Swallow;
+                    self.enter_live()
+                }
+                Some(Chord::Cancel) => self.cancel(ix),
+                _ => {
+                    self.route[ix] = Route::Swallow;
+                    vec![Action::Swallow]
+                }
+            },
+            Layer::Live(rows) => {
+                let hit = rows
+                    .iter()
+                    .find(|row| row.label == Some(ev.key))
+                    .map(|row| row.pid);
+                if let Some(pid) = hit {
+                    self.commit(ix, AppRef::Pid(pid))
+                } else {
+                    match self.tables.pinned.get(ix).copied().flatten() {
+                        Some(Chord::ToggleMode) if !ev.repeat => {
+                            self.route[ix] = Route::Swallow;
+                            self.enter_pinned()
+                        }
+                        Some(Chord::Cancel) => self.cancel(ix),
+                        _ => {
+                            self.route[ix] = Route::Swallow;
+                            vec![Action::Swallow]
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// An autorepeat follows its down's decision, whatever the phase now is.
+    fn obey_repeat(&mut self, ev: RawKey, ix: usize, committed: bool) -> Vec<Action> {
+        match self.route[ix] {
+            Route::Pass => vec![Action::Pass],
+            Route::Synth(key) if !committed => vec![
+                Action::Swallow,
+                Action::Synth(SynthKey {
+                    key,
+                    down: true,
+                    flags: ev.flags.keep_only_shift(),
+                }),
+            ],
+            Route::Swallow | Route::Synth(_) => vec![Action::Swallow],
+            Route::Undecided => match &self.phase {
+                Phase::Idle => {
+                    self.route[ix] = Route::Pass;
+                    vec![Action::Pass]
+                }
+                _ => {
+                    self.route[ix] = Route::Swallow;
+                    vec![Action::Swallow]
+                }
+            },
+        }
+    }
+
+    /// An up obeys its down's decision: passed keys pass, synthesized keys
+    /// close with a matching up, swallowed keys stay silent.
+    fn decide_up(&mut self, ev: RawKey, ix: usize, committed: bool) -> Vec<Action> {
+        let route = self.route[ix];
+        self.route[ix] = Route::Undecided;
+        match route {
+            Route::Pass => vec![Action::Pass],
+            Route::Synth(key) if !committed => vec![
+                Action::Swallow,
+                Action::Synth(SynthKey {
+                    key,
+                    down: false,
+                    flags: ev.flags.keep_only_shift(),
+                }),
+            ],
+            Route::Swallow | Route::Synth(_) => vec![Action::Swallow],
+            Route::Undecided => match &self.phase {
+                Phase::Idle => vec![Action::Pass],
+                _ => vec![Action::Swallow],
+            },
+        }
+    }
+
+    fn engage(&mut self, overlay: OverlayPhase) {
+        self.phase = Phase::Meta {
+            overlay,
+            committed: false,
+        };
+    }
+
+    fn cancel(&mut self, ix: usize) -> Vec<Action> {
+        self.route[ix] = Route::Swallow;
+        self.phase = Phase::Meta {
+            overlay: OverlayPhase::Hidden,
+            committed: false,
+        };
+        vec![Action::Swallow, Action::Ui(UiMsg::HideFade)]
+    }
+
+    /// Commit = hide instantly, switch on the main thread, and make the rest
+    /// of the hold inert so leftover autorepeats never type into the app we
+    /// just landed on.
+    fn commit(&mut self, ix: usize, app: AppRef) -> Vec<Action> {
+        self.route[ix] = Route::Swallow;
+        self.phase = Phase::Meta {
+            overlay: OverlayPhase::Hidden,
+            committed: true,
+        };
+        vec![
+            Action::Swallow,
+            Action::Ui(UiMsg::Hide),
+            Action::Job(Job::Switch(SwitchRequest { app })),
+        ]
+    }
+
+    /// Open the switcher on user-pinned apps; an empty pin list boots
+    /// straight to the live list (an empty overlay is a dead end).
+    fn enter_pinned(&mut self) -> Vec<Action> {
+        let config = self.config.load_full();
+        if config.pinned.is_empty() {
+            let mut actions = self.enter_live();
+            actions.push(Action::Job(Job::RefreshWindowCounts));
+            return actions;
+        }
+        let rows: Vec<PinnedRow> = config
+            .pinned
+            .iter()
+            .map(|app| PinnedRow {
+                key: app.key,
+                name: app.name.clone(),
+                glyph: crate::key::glyph(app.key),
+            })
+            .collect();
+        self.phase = Phase::Meta {
+            overlay: OverlayPhase::Pinned,
+            committed: false,
+        };
+        vec![
+            Action::Swallow,
+            Action::Ui(UiMsg::ShowPinned { rows: rows.into() }),
+            Action::Job(Job::RefreshWindowCounts),
+        ]
+    }
+
+    /// Freeze a live model from the current app index and show it. Labels
+    /// (and the sticky memory they update) are computed once here and never
+    /// mutate during the hold.
+    fn enter_live(&mut self) -> Vec<Action> {
+        let index = self.index.load_full();
+        let slots: Vec<crate::bridge::AppSlot> = index
+            .slots
+            .iter()
+            .filter(|slot| !slot.is_frontmost && slot.windows > 0)
+            .cloned()
+            .collect();
+        let pinned: Vec<PhysicalKey> = self
+            .config
+            .load_full()
+            .pinned
+            .iter()
+            .map(|app| app.key)
+            .collect();
+        let labels = crate::labels::assign_labels(&slots, &self.memory, &pinned);
+        let mut rows = Vec::with_capacity(slots.len());
+        for (slot, label) in slots.into_iter().zip(labels) {
+            if let (Some(bundle), Some(key)) = (&slot.bundle_id, label) {
+                self.memory.0.insert(bundle.clone(), key);
+            }
+            rows.push(LiveRow {
+                pid: slot.pid,
+                bundle: slot.bundle_id,
+                name: slot.name,
+                windows: slot.windows,
+                label,
+            });
+        }
+        let rows: Arc<[LiveRow]> = Arc::from(rows);
+        self.phase = Phase::Meta {
+            overlay: OverlayPhase::Live(Box::new(LiveModel { rows: rows.clone() })),
+            committed: false,
+        };
+        vec![
+            Action::Swallow,
+            Action::Ui(UiMsg::ShowLive { rows }),
+            Action::Job(Job::MergeLabels(self.memory.clone())),
+        ]
     }
 }
