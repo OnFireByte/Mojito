@@ -76,4 +76,6 @@ pub enum Job {
     CycleInputSource,
     RefreshWindowCounts,
     MergeLabels(crate::labels::LabelMemory),
+    /// The settings process saved; re-read the file and swap it in.
+    ReloadConfig,
 }

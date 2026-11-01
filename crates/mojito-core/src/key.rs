@@ -58,10 +58,12 @@ pub const M: PhysicalKey = PhysicalKey(0x2E);
 pub const CAPS_USAGE: HidUsage = HidUsage(0x7_0000_0039);
 pub const F18_USAGE: HidUsage = HidUsage(0x7_0000_006D);
 
-/// Reserved control keycode: unassigned on macOS keyboards (hex's
-/// chord-breaker hole). The UI posts an unmarked synthetic keyDown here to
-/// reach the engine, and the tap swallows it as a cancel-overlay command.
+/// Reserved control keycodes: unassigned on macOS keyboards (hex's
+/// chord-breaker hole and its neighbor). The UI posts unmarked synthetic
+/// keyDowns here to reach the engine, and the tap swallows them.
 pub const CONTROL: PhysicalKey = PhysicalKey(0x44);
+/// Posts "the settings file changed": the tap turns it into a config reload.
+pub const CONTROL_RELOAD: PhysicalKey = PhysicalKey(0x46);
 
 /// US-ANSI position to glyph, for badges and labels only. Never used to
 /// interpret a keystroke. Positions without a printable glyph (F-keys,

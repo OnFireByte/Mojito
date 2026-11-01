@@ -270,6 +270,20 @@ unsafe extern "C" fn on_key_event(
         });
         return ptr::null_mut();
     }
+    // The settings process's save signal: reload the config on main.
+    if event_type == EVENT_KEY_DOWN
+        && unsafe { CGEventGetIntegerValueField(event, KEYBOARD_EVENT_KEYCODE) }
+            == mojito_core::CONTROL_RELOAD.0 as i64
+    {
+        TAP.with_borrow_mut(|state| {
+            if state.jobs.as_ref().is_some_and(|tx| tx.try_send(mojito_core::Job::ReloadConfig).is_ok())
+                && let Some(wake) = state.job_wake.as_ref()
+            {
+                wake();
+            }
+        });
+        return ptr::null_mut();
+    }
     let pass = TAP.with_borrow_mut(|state| {
         let Some(engine) = &mut state.engine else {
             return true;

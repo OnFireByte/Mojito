@@ -24,7 +24,6 @@ use rune::{
     App, AppHandle, DisplayId, DisplayTarget, OverlayHandle, OverlayPlacement, RunOptions, Tx,
     WindowSpec,
 };
-use ui_settings::SettingsState;
 use ui_switcher::Switcher;
 
 /// Generous bounds so the engine's `try_send` never drops in practice while
@@ -59,6 +58,10 @@ fn main() {
             mojito_macos::synth::post_raw(code, down);
             return;
         }
+        Some("settings") => {
+            ui_settings::run_child();
+            return;
+        }
         Some("windows") => {
             mojito_macos::index::debug_windows();
             return;
@@ -70,6 +73,11 @@ fn main() {
         None => {}
     }
     warn_unbundled();
+    // The native Metal backend skips the wgpu/naga code pages entirely,
+    // which keeps several MB out of Real Memory; rune keeps it behind this
+    // env knob.
+    // SAFETY: single-threaded startup; rune reads the env during prewarm.
+    unsafe { std::env::set_var("RUNE_GPU_BACKEND", "metal") };
     if status_item::activate_existing() {
         eprintln!("mojito: already running; activated the existing instance");
         return;
@@ -112,22 +120,6 @@ fn main() {
             move |s, _| s.me = Some(handle)
         });
 
-        let settings_app = App::new(app_spec::settings_spec())
-            // Deferred surface: the app exists but its window keeps no
-            // framebuffer until it is first opened.
-            .windowless()
-            .standard_menus()
-            .on_close(ui_settings::closed)
-            .init({
-                let store = store.clone();
-                let hub = hub.clone();
-                move || SettingsState::new(store, hub)
-            });
-        let (settings, _settings_window) = app.window(
-            WindowSpec::from_app("settings", settings_app)
-                .configured_options(app_spec::settings_window_options()),
-        );
-
         index.start();
         layout::snapshot();
         // Hint glyphs follow the saved display layout from the first reveal.
@@ -139,7 +131,7 @@ fn main() {
         if permission::state() == permission::PermissionState::NeedsGrant {
             permission::prompt();
         }
-        pump_menu(menu_rx, hub.clone(), settings.clone());
+        pump_menu(menu_rx, hub.clone());
 
         match start_taps(
             store.handle(),
@@ -292,6 +284,12 @@ fn hub_poll(s: &mut Hub, _: f64, _: &mut Tx) -> bool {
             }
             Job::RefreshWindowCounts => index.refresh_window_counts(),
             Job::MergeLabels(memory) => store.merge_labels(memory),
+            Job::ReloadConfig => {
+                if let Err(error) = store.reload() {
+                    eprintln!("mojito: config reload: {error}");
+                }
+                layout::set_display_layout(store.handle().load().hint_layout.clone());
+            }
         }
     }
     acted
@@ -354,22 +352,23 @@ fn placement(s: &Hub, size: (f32, f32)) -> (Option<DisplayTarget>, Rect) {
 /// The status item's menu actions arrive over a channel whose sender cannot
 /// wake the rune loop, so a thread parked on `recv` pumps each action into an
 /// `AppHandle::update`, which does. Idle cost: one parked thread.
-fn pump_menu(
-    rx: mpsc::Receiver<status_item::MenuAction>,
-    hub: AppHandle<Hub>,
-    settings: AppHandle<SettingsState>,
-) {
+fn pump_menu(rx: mpsc::Receiver<status_item::MenuAction>, hub: AppHandle<Hub>) {
     std::thread::Builder::new()
         .name("mojito-menu".into())
         .spawn(move || {
             while let Ok(action) = rx.recv() {
-                let inner = hub.clone();
-                let settings = settings.clone();
                 hub.update(move |_, tx| match action {
                     status_item::MenuAction::OpenSettings => {
-                        inner.set_dock_icon(true);
-                        settings.open();
-                        settings.update(ui_settings::opened);
+                        // The settings window runs in its own short-lived
+                        // process, so its memory returns fully on close.
+                        if let Err(spawn_error) = std::process::Command::new(
+                            std::env::current_exe().unwrap_or_else(|_| "mojito".into()),
+                        )
+                        .arg("settings")
+                        .spawn()
+                        {
+                            eprintln!("mojito: settings process: {spawn_error}");
+                        }
                     }
                     status_item::MenuAction::ToggleLogin => login::toggle(),
                     status_item::MenuAction::RestoreCaps => {
@@ -475,7 +474,7 @@ fn sync_caps_mapping(store: &ConfigStore) {
 
 /// `~/Library/Application Support/Mojito/settings.json`, the architecture's
 /// one settings file.
-fn settings_path() -> PathBuf {
+pub(crate) fn settings_path() -> PathBuf {
     std::env::var_os("HOME")
         .map(|home| PathBuf::from(home).join("Library/Application Support/Mojito/settings.json"))
         .unwrap_or_else(|| PathBuf::from("settings.json"))

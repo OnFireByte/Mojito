@@ -14,6 +14,8 @@ pub mod tables;
 pub use bridge::{AppIndex, AppRef, Job, LiveRow, PinnedRow, SwitchRequest, UiMsg};
 pub use config::{Config, PinnedApp};
 pub use engine::{Action, Engine, Mono, RawKey, SynthKey};
-pub use key::{CAPS, CAPS_USAGE, CONTROL, F18, F18_USAGE, HidUsage, ModifierFlags, PhysicalKey};
+pub use key::{
+    CAPS, CAPS_USAGE, CONTROL, CONTROL_RELOAD, F18, F18_USAGE, HidUsage, ModifierFlags, PhysicalKey,
+};
 pub use labels::{LABEL_PRIORITY, LabelMemory, RESERVED, assign_labels};
 pub use store::ConfigStore;

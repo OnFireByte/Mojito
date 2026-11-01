@@ -5,7 +5,7 @@ use std::ptr;
 
 use objc2::msg_send;
 use objc2_app_kit::{NSRunningApplication, NSWorkspace};
-use objc2_foundation::{NSString, NSURL};
+use objc2_foundation::NSString;
 
 type ImageRef = *const c_void;
 
@@ -25,8 +25,6 @@ unsafe extern "C" {
     fn CGContextDrawImage(context: *mut c_void, rect: CGRect, image: ImageRef);
     fn CGContextTranslateCTM(context: *mut c_void, x: f64, y: f64);
     fn CGContextScaleCTM(context: *mut c_void, sx: f64, sy: f64);
-    fn CGBitmapContextCreateImageData(context: *mut c_void) -> ImageRef;
-    fn CFRelease(value: ImageRef);
 }
 
 #[repr(C)]
@@ -48,7 +46,7 @@ pub fn app_icon_rgba(bundle: &str, size: u32) -> Option<Vec<u8>> {
     let bundle = NSString::from_str(bundle);
     // SAFETY: AppKit calls on the main thread; returned NSImages are
     // retained and released by their wrappers.
-    let image = unsafe {
+    let image = {
         let apps = NSRunningApplication::runningApplicationsWithBundleIdentifier(&bundle);
         let running = apps.to_vec().into_iter().find(|app| !app.isTerminated());
         match running {

@@ -17,7 +17,7 @@ use mojito_core::{ConfigStore, PhysicalKey};
 use mojito_macos::caps::CapsMap;
 use mojito_macos::layout::LayoutInfo;
 use mojito_macos::{layout, permission};
-use rune::{AppHandle, PhysicalInput, Tx};
+use rune::{App, AppHandle, PhysicalInput, RunOptions, Tx, WindowSpec};
 
 use crate::Hub;
 use crate::catalog::{self, CatalogApp};
@@ -179,6 +179,32 @@ pub fn opened(s: &mut SettingsState, tx: &mut Tx) {
     tx.wake_after(REFRESH_AFTER);
 }
 
+/// The settings process: one rune loop and one window. Closing it exits the
+/// process and returns every byte it held to the system; saves post the
+/// reserved reload keycode so the engine applies them live.
+pub fn run_child() {
+    let store = Arc::new(ConfigStore::open(crate::settings_path()));
+    rune::run_windows_with_args(RunOptions { accessory: true }, Vec::new(), move |_| {
+        // The state's handle wants a Hub; a detached windowless hub app
+        // satisfies it without adding a surface. This process's lifetime
+        // is the settings window's, so no keep_running.
+        let hub = App::new(crate::app_spec::hub_spec()).windowless().handle();
+        let app = App::new(crate::app_spec::settings_spec())
+            .standard_menus()
+            .on_close(closed)
+            .init({
+                let store = store.clone();
+                move || SettingsState::new(store, hub)
+            });
+        let handle = app.handle();
+        let app = app.on_ready(move |_| handle.update(|s, tx| opened(s, tx)));
+        vec![
+            WindowSpec::from_app("settings", app)
+                .configured_options(crate::app_spec::settings_window_options()),
+        ]
+    });
+}
+
 /// The window closed: back to accessory, and the periodic reads stop.
 pub fn closed(s: &mut SettingsState, _: &mut Tx) {
     s.hub.set_dock_icon(false);
@@ -186,7 +212,9 @@ pub fn closed(s: &mut SettingsState, _: &mut Tx) {
     s.hint_menu_open = false;
     s.live_refresh = false;
     let usage = procwatch::usage();
-    let mb = |bytes: Option<u64>| bytes.map_or_else(|| "?".into(), |b| format!("{:.1}MB", b as f64 / 1e6));
+    let mb = |bytes: Option<u64>| {
+        bytes.map_or_else(|| "?".into(), |b| format!("{:.1}MB", b as f64 / 1e6))
+    };
     eprintln!(
         "mojito: settings closed; footprint {} peak {}",
         mb(usage.footprint),
@@ -239,8 +267,13 @@ fn save(s: &mut SettingsState, tx: &mut Tx) {
     next.hint_layout = s.hint_layout.clone();
     next.version += 1;
     let (next, warnings) = config::validate(next);
+    // The parent engine owns label memory; this process's snapshot must not
+    // roll it back. Saving then posts the reserved reload keycode so the
+    // engine applies the new config live.
+    let next = s.store.with_disk_labels(next);
     match s.store.save(next) {
         Ok(()) => {
+            mojito_macos::synth::post_raw(mojito_core::CONTROL_RELOAD.0, true);
             let mut note = if unkeyed > 0 {
                 format!("Saved · {unkeyed} app(s) still need a trigger key")
             } else {
@@ -337,6 +370,9 @@ pub(super) fn open_catalog(s: &mut SettingsState) {
 fn choose_layout(s: &mut SettingsState, id: Option<String>, tx: &mut Tx) {
     s.hint_menu_open = false;
     s.hint_layout = id.clone();
+    // Apply locally so this window's own badges render in the chosen
+    // layout; the overlay process learns of the pick through the saved
+    // config and the reload signal.
     layout::set_display_layout(id);
     save(s, tx);
 }

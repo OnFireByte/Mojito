@@ -26,7 +26,7 @@ rune-theme-opencode = { path = "vendor/rune/themes/opencode" }
 rune-motion = { path = "vendor/rune/crates/rune-motion" }
 rune-staging = { path = "vendor/rune/crates/rune-staging" }
 procwatch = { path = "vendor/rune/crates/procwatch" }
-rune-mermaid = { path = "vendor/rune/crates/rune-mermaid" }
 
 [profile.release]
 strip = true
+lto = "thin"

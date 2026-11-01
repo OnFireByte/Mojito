@@ -78,6 +78,34 @@ impl ConfigStore {
             self.pending.lock().unwrap().scheduled = false;
         }
     }
+
+    /// Label memory is engine-owned: a settings save from another process
+    /// must not roll it back to a stale snapshot.
+    pub fn with_disk_labels(&self, mut next: Config) -> Config {
+        if let Ok(bytes) = std::fs::read(&self.path) {
+            let (disk, _) = crate::config::parse(&bytes);
+            next.label_memory = disk.label_memory;
+        }
+        next
+    }
+
+    /// Re-read the file another process saved and swap it in. The version
+    /// moves past the current one so the engine rebuilds its tables, and
+    /// label memory stays engine-owned (the file wins for labels), so a
+    /// settings save never clobbers labels merged while the editor was
+    /// open.
+    pub fn reload(&self) -> Result<(), std::io::Error> {
+        let bytes = match std::fs::read(&self.path) {
+            Ok(bytes) => bytes,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Vec::new(),
+            Err(error) => return Err(error),
+        };
+        let (mut next, _) = crate::config::parse(&bytes);
+        let _guard = self.writer.lock().unwrap();
+        next.version = self.current.load().version.max(next.version) + 1;
+        self.current.store(Arc::new(next));
+        Ok(())
+    }
 }
 
 fn flush_later(
