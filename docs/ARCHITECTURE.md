@@ -47,6 +47,7 @@ pub struct HidUsage(u32);
 
 pub const CAPS:     PhysicalKey = PhysicalKey(0x39); // kVK_CapsLock = 57
 pub const F18:      PhysicalKey = PhysicalKey(0x4F); // kVK_F18 = 79 (SDK Events.h)
+pub const CONTROL:  PhysicalKey = PhysicalKey(0x44); // unassigned control keycode
 pub const CAPS_USAGE: HidUsage   = HidUsage(0x700000039);
 pub const F18_USAGE:  HidUsage   = HidUsage(0x70000006D); // 30064771181, TN2450 encoding
 
@@ -88,11 +89,17 @@ pub struct Engine {
 enum Phase {
     Idle,
     Armed { down_at: Mono, used: bool },
-    /// `committed` makes the rest of the hold inert after a switch, so leftover
-    /// autorepeats never type into the app we just landed on.
-    Meta { overlay: OverlayPhase, committed: bool },
+    /// Meta layer active, overlay hidden: bound chords route, unbound keys
+    /// stay silent. `committed` makes the rest of the hold inert after a
+    /// switch so leftover autorepeats never type into the app we landed on.
+    Held { committed: bool },
+    /// The switcher is visible and survives meta release; while it shows,
+    /// every bare key is ours. F18 may be up or down.
+    Overlay { overlay: OverlayPhase, committed: bool },
 }
 enum OverlayPhase { Hidden, Pinned, Live(Box<LiveModel>) }
+```
+An engine field `meta_down` tracks whether F18 is physically down, because commit and cancel land differently: with meta still held they return to the chord layer (inert when committed), without it they return to transparent Idle.
 enum Route { Undecided, Pass, Swallow }
 
 /// Invariants of Engine::on_event (pure; no I/O; never blocks; O(1) per event):
@@ -221,9 +228,9 @@ The whole UX in one matrix. `route[key]` makes every down decision bind its up; 
 | esc | swallow | Cancel (HideFade) | Cancel (HideFade) |
 | any key, flags CMD/CTRL/OPT | Pass (and marks used) | Pass (and marks used) | Pass (and marks used) |
 | any other bare key | swallow | swallow | swallow |
-| F18 up | tap within tap_max_ms and !used -> synth Esc; else nothing -> Idle | Hide -> Idle | Hide -> Idle |
+| F18 up | tap within tap_max_ms and !used -> synth Esc; else nothing -> Idle | overlay stays open | overlay stays open |
 
-Commit = `Ui(Hide)` + `Job(Switch)` + `committed = true`. Release always cancels the overlay; there is no lingering overlay and no commit-on-release surprise.
+Commit = `Ui(Hide)` + `Job(Switch)` + `committed = true` while meta is held, or an immediate return to transparent Idle when the overlay was already sticky. Esc cancels with `HideFade`. The overlay is sticky: releasing meta leaves it open, and while it shows the engine owns every bare key; Esc, a selection, or the control keycode closes it. Click-to-cancel reaches the engine because the UI posts an unmarked synthetic keyDown on the reserved unassigned `CONTROL` keycode, which the tap swallows and turns into a cancel.
 
 ## macOS backend
 
