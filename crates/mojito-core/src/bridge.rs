@@ -4,7 +4,7 @@
 use crate::key::PhysicalKey;
 use std::sync::Arc;
 
-#[derive(Debug)]
+#[derive(Debug, PartialEq)]
 pub struct PinnedRow {
     pub key: PhysicalKey,
     pub name: String,
@@ -18,7 +18,7 @@ pub struct LiveModel {
     pub rows: Arc<[LiveRow]>,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct LiveRow {
     pub pid: i32,
     pub bundle: Option<String>,
@@ -43,29 +43,33 @@ pub struct AppSlot {
     pub is_frontmost: bool,
 }
 
-#[derive(Debug)]
+#[derive(Debug, PartialEq)]
 pub enum UiMsg {
-    ShowPinned { rows: Arc<[PinnedRow]> },
-    ShowLive { rows: Arc<[LiveRow]> },
+    ShowPinned {
+        rows: Arc<[PinnedRow]>,
+    },
+    ShowLive {
+        rows: Arc<[LiveRow]>,
+    },
     /// Instant hide on commit.
     Hide,
     /// Short fade on cancel.
     HideFade,
 }
 
-#[derive(Debug)]
+#[derive(Debug, PartialEq)]
 pub enum AppRef {
     Pid(i32),
     Bundle(String),
     Launch(std::path::PathBuf, String),
 }
 
-#[derive(Debug)]
+#[derive(Debug, PartialEq)]
 pub struct SwitchRequest {
     pub app: AppRef,
 }
 
-#[derive(Debug)]
+#[derive(Debug, PartialEq)]
 pub enum Job {
     Switch(SwitchRequest),
     CycleInputSource,
