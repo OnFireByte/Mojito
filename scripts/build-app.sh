@@ -18,6 +18,13 @@ mkdir -p "$bundle/Contents/MacOS" "$bundle/Contents/Resources"
 cp "$root/target/release/mojito" "$executable"
 cp "$root/app/Info.plist" "$bundle/Contents/Info.plist"
 
-codesign --force --sign - "$bundle"
+# Prefer the stable self-signed identity so the Accessibility grant survives
+# rebuilds; ad-hoc otherwise (every ad-hoc rebuild invalidates the grant).
+IDENTITY="Mojito Dev"
+if security find-identity -v -p codesigning 2>/dev/null | grep -q "$IDENTITY"; then
+	codesign --force --sign "$IDENTITY" "$bundle"
+else
+	codesign --force --sign - "$bundle"
+fi
 codesign --verify --strict "$bundle"
 echo "$bundle"

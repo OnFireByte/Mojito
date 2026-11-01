@@ -132,22 +132,19 @@ fn first_window(app: &CfObject) -> Option<AxWindow> {
 /// a failing ladder names the failing step. Runs without the GUI.
 pub fn debug_switch(bundle: &str) {
     let app = mojito_core::AppRef::Bundle(bundle.to_string());
-    let pid = match resolve(&app) {
-        Some(pid) => {
-            println!("resolve: pid {pid}");
-            pid
-        }
-        None => {
-            println!("resolve: FAILED for {bundle}");
-            return;
-        }
+    let Some(pid) = resolve(&app) else {
+        println!("resolve: FAILED for {bundle}");
+        return;
     };
-    let running = objc2_app_kit::NSRunningApplication::runningApplicationWithProcessIdentifier(pid);
-    if let Some(running) = running {
-        println!("hidden: {}", running.isHidden());
-        let activated = running.activateWithOptions(objc2_app_kit::NSApplicationActivationOptions::empty());
-        println!("activate: {activated}");
-    }
+    println!("resolve: pid {pid}");
+    let Some(running) = objc2_app_kit::NSRunningApplication::runningApplicationWithProcessIdentifier(pid) else {
+        println!("running app: not found");
+        return;
+    };
+    println!("hidden: {}", running.isHidden());
+    unminimize(pid);
+    let activated = running.activateWithOptions(objc2_app_kit::NSApplicationActivationOptions::empty());
+    println!("activate: {activated}");
     match pick_window_verbose(pid) {
         Ok((via, window)) => {
             println!("pick_window: via {via}");

@@ -263,3 +263,49 @@ fn dict_number(dict: &CFDictionary, key: &str) -> Option<i64> {
     // SAFETY: kCGWindowLayer/kCGWindowOwnerPID values are CFNumbers.
     unsafe { &*(value as *const CFNumber) }.as_i64()
 }
+
+/// Debug: every on-screen window owned by this app, with its alpha, so the
+/// overlay's shown/hidden state can be read from outside the process.
+pub fn debug_windows() {
+    // SAFETY: CoreGraphics returns a +1 CFArray of CFDictionary window info.
+    let list = unsafe { CGWindowListCopyWindowInfo(ON_SCREEN_ONLY, 0) };
+    if list.is_null() {
+        println!("no window list");
+        return;
+    }
+    // SAFETY: the array lives until the release below and holds dictionaries.
+    let array = unsafe { &*(list as *const CFArray<CFDictionary>) };
+    let mut printed = 0;
+    for index in 0..array.len() as isize {
+        // SAFETY: the index is in bounds and the array is not mutated.
+        let dict = unsafe { array.get_unchecked(index) };
+        let Some(owner) = dict_string(dict, "kCGWindowOwnerName") else {
+            continue;
+        };
+        let layer = dict_number(dict, "kCGWindowLayer").unwrap_or(0);
+        // Status-level windows (the overlay) or our own process only.
+        if owner.to_lowercase().contains("moji") == false && layer < 20 {
+            continue;
+        }
+        let number = dict_number(dict, "kCGWindowNumber").unwrap_or(0);
+        let alpha = dict_number(dict, "kCGWindowAlpha").unwrap_or(-1);
+        println!("owner {owner:?} window {number} layer {layer} alpha {alpha}");
+        printed += 1;
+    }
+    if printed == 0 {
+        println!("no mojito windows on screen");
+    }
+    // SAFETY: the list was retained by the copy call above.
+    unsafe { CFRelease(list) };
+}
+
+fn dict_string(dict: &CFDictionary, key: &str) -> Option<String> {
+    // SAFETY: the dictionary is alive and its values are CF objects.
+    let key = CFString::from_str(key);
+    let value = unsafe { dict.value(&*key as *const CFString as *const c_void) };
+    if value.is_null() {
+        return None;
+    }
+    // SAFETY: kCGWindowOwnerName values are CFStrings.
+    Some(unsafe { &*(value as *const CFString) }.to_string())
+}

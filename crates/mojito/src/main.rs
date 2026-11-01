@@ -59,8 +59,12 @@ fn main() {
             mojito_macos::synth::post_raw(code, down);
             return;
         }
+        Some("windows") => {
+            mojito_macos::index::debug_windows();
+            return;
+        }
         Some(other) => {
-            eprintln!("unknown verb {other}; verbs: switch, key");
+            eprintln!("unknown verb {other}; verbs: switch, key, windows");
             return;
         }
         None => {}
@@ -211,7 +215,7 @@ fn hub_poll(s: &mut Hub, _: f64, _: &mut Tx) -> bool {
                 let rows = rows
                     .iter()
                     .map(|r| ui_switcher::Row {
-                        badge: Some(r.glyph),
+                        badge: layout::glyph(r.key).or(Some(r.glyph)),
                         name: r.name.clone(),
                         windows: None,
                     })
@@ -219,6 +223,7 @@ fn hub_poll(s: &mut Hub, _: f64, _: &mut Tx) -> bool {
                 reveal(overlay, s, ui_switcher::Mode::Pinned, rows);
             }
             UiMsg::ShowLive { rows } => {
+                eprintln!("mojito: live rows: {}", rows.len()); // TEMP diagnosis
                 let rows = rows
                     .iter()
                     .map(|r| ui_switcher::Row {
