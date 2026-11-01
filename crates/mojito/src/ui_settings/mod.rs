@@ -203,7 +203,7 @@ pub fn run_child() {
             handle.update(opened);
             // A process spawned from another app gets no activation
             // ceremony; take focus once the window exists.
-            mojito_macos::activate_self();
+            mojito_macos::status_item::activate_self();
         });
         vec![
             WindowSpec::from_app("settings", app)
