@@ -1211,6 +1211,7 @@ dependencies = [
 name = "mojito"
 version = "0.1.0"
 dependencies = [
+ "arc-swap",
  "mojito-core",
  "mojito-macos",
  "objc2 0.6.5",

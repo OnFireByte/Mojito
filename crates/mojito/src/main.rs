@@ -14,8 +14,9 @@ use std::sync::Arc;
 use std::sync::mpsc;
 use std::time::Duration;
 
+use arc_swap::ArcSwap;
 use mojito_core::geom::{self, DisplayInfo, Rect};
-use mojito_core::{ConfigStore, Engine, Job, UiMsg};
+use mojito_core::{AppIndex, Config, ConfigStore, Engine, Job, UiMsg};
 use mojito_macos::caps::CapsMap;
 use mojito_macos::index::AppIndexHandle;
 use mojito_macos::{cursor, layout, permission, status_item, switch, taps, tis};
@@ -39,12 +40,6 @@ fn main() {
     let index = AppIndexHandle::new();
     let (ui_tx, ui_rx) = mpsc::sync_channel::<UiMsg>(UI_CHANNEL_BOUND);
     let (jobs_tx, jobs_rx) = mpsc::sync_channel::<Job>(JOB_CHANNEL_BOUND);
-    let engine = Engine::new(
-        store.handle(),
-        index.handle(),
-        ui_tx.clone(),
-        jobs_tx.clone(),
-    );
     let (menu_tx, menu_rx) = mpsc::sync_channel::<status_item::MenuAction>(8);
 
     rune::run_windows_with(RunOptions { accessory: true }, move |displays| {
@@ -103,22 +98,25 @@ fn main() {
         }
         pump_menu(menu_rx, hub.clone(), settings.clone());
 
-        let ui_wake: Box<dyn Fn() + Send> = {
-            let hub = hub.clone();
-            Box::new(move || hub.wake())
-        };
-        let job_wake: Box<dyn Fn() + Send> = {
-            let hub = hub.clone();
-            Box::new(move || hub.wake())
-        };
-        if let Err(error) = taps::spawn(taps::TapDeps {
-            engine,
-            ui: ui_tx,
-            jobs: jobs_tx,
-            ui_wake,
-            job_wake,
-        }) {
-            eprintln!("mojito: taps: {error}");
+        match start_taps(
+            store.handle(),
+            index.handle(),
+            ui_tx.clone(),
+            jobs_tx.clone(),
+            &hub,
+        ) {
+            Ok(()) => {}
+            Err(error) => {
+                eprintln!("mojito: taps: {error}");
+                // The grant can land while we run; go live the moment it does.
+                arm_permission_wait(
+                    store.handle(),
+                    index.handle(),
+                    ui_tx.clone(),
+                    jobs_tx.clone(),
+                    hub.clone(),
+                );
+            }
         }
 
         let app = app.init(move || Hub {
@@ -316,13 +314,68 @@ fn pump_menu(
         .expect("spawn menu pump");
 }
 
+/// Build a fresh engine and spawn the tap thread. Called at startup and
+/// again by the permission waiter; each attempt owns its own engine, so a
+/// failed start leaves nothing behind.
+fn start_taps(
+    store: Arc<ArcSwap<Config>>,
+    index: Arc<ArcSwap<AppIndex>>,
+    ui_tx: mpsc::SyncSender<UiMsg>,
+    jobs_tx: mpsc::SyncSender<Job>,
+    hub: &AppHandle<Hub>,
+) -> Result<(), String> {
+    let engine = Engine::new(store, index, ui_tx.clone(), jobs_tx.clone());
+    let ui_wake: Box<dyn Fn() + Send> = {
+        let hub = hub.clone();
+        Box::new(move || hub.wake())
+    };
+    let job_wake: Box<dyn Fn() + Send> = {
+        let hub = hub.clone();
+        Box::new(move || hub.wake())
+    };
+    taps::spawn(taps::TapDeps {
+        engine,
+        ui: ui_tx,
+        jobs: jobs_tx,
+        ui_wake,
+        job_wake,
+    })
+}
+
+/// Poll for the Accessibility grant and bring the engine live the moment it
+/// lands. The thread exits after one successful spawn, so it costs nothing
+/// once granted.
+fn arm_permission_wait(
+    store: Arc<ArcSwap<Config>>,
+    index: Arc<ArcSwap<AppIndex>>,
+    ui_tx: mpsc::SyncSender<UiMsg>,
+    jobs_tx: mpsc::SyncSender<Job>,
+    hub: AppHandle<Hub>,
+) {
+    std::thread::Builder::new()
+        .name("mojito-permwait".into())
+        .spawn(move || {
+            while permission::state() == permission::PermissionState::NeedsGrant {
+                std::thread::sleep(Duration::from_millis(250));
+            }
+            if let Err(error) = start_taps(store, index, ui_tx, jobs_tx, &hub) {
+                eprintln!("mojito: taps after grant: {error}");
+            }
+        })
+        .expect("spawn permission waiter");
+}
+
 /// Make the hidutil mapping match the capture setting and keep the
 /// LaunchAgent behind it alive. Runs on the main thread at startup; the
 /// settings pane and the status menu cover it afterwards.
 fn sync_caps_mapping(store: &ConfigStore) {
     let capture_on = store.handle().load().capture_enabled;
     let result = if capture_on {
-        let install = if CapsMap.is_active() { Ok(()) } else { CapsMap.install() };
+        let install = if CapsMap.is_active() {
+            Ok(())
+        } else {
+            CapsMap.install()
+        };
         install.and_then(|()| CapsMap.ensure_agent())
     } else if CapsMap.is_active() {
         CapsMap.uninstall()
