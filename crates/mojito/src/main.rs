@@ -94,6 +94,7 @@ fn main() {
 
         index.start();
         layout::snapshot();
+        sync_caps_mapping(&store);
         if let Err(error) = status_item::install(menu_tx) {
             eprintln!("mojito: status item: {error}");
         }
@@ -313,6 +314,27 @@ fn pump_menu(
             }
         })
         .expect("spawn menu pump");
+}
+
+/// Make the hidutil mapping match the capture setting and keep the
+/// LaunchAgent behind it alive. Runs on the main thread at startup; the
+/// settings pane and the status menu cover it afterwards.
+fn sync_caps_mapping(store: &ConfigStore) {
+    let capture_on = store.handle().load().capture_enabled;
+    let result = if capture_on {
+        let install = if CapsMap.is_active() { Ok(()) } else { CapsMap.install() };
+        install.and_then(|()| CapsMap.ensure_agent())
+    } else if CapsMap.is_active() {
+        CapsMap.uninstall()
+    } else {
+        Ok(())
+    };
+    if let Err(error) = result {
+        eprintln!("mojito: caps mapping: {error}");
+    }
+    if capture_on && !CapsMap.is_active() {
+        status_item::set_needs_attention(true);
+    }
 }
 
 /// `~/Library/Application Support/Mojito/settings.json`, the architecture's
