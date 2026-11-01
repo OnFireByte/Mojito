@@ -121,6 +121,8 @@ fn main() {
 
         index.start();
         layout::snapshot();
+        // Hint glyphs follow the saved display layout from the first reveal.
+        layout::set_display_layout(store.handle().load().hint_layout.clone());
         sync_caps_mapping(&store);
         if let Err(error) = status_item::install(menu_tx) {
             eprintln!("mojito: status item: {error}");
