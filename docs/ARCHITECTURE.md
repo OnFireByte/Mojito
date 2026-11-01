@@ -47,8 +47,8 @@ pub struct HidUsage(u32);
 
 pub const CAPS:     PhysicalKey = PhysicalKey(0x39); // kVK_CapsLock = 57
 pub const F18:      PhysicalKey = PhysicalKey(0x4F); // kVK_F18 = 79 (SDK Events.h)
-pub const CAPS_USAGE: HidUsage   = HidUsage(0x7000_0039);
-pub const F18_USAGE:  HidUsage   = HidUsage(0x7000_006D); // 30064771181
+pub const CAPS_USAGE: HidUsage   = HidUsage(0x700000039);
+pub const F18_USAGE:  HidUsage   = HidUsage(0x70000006D); // 30064771181, TN2450 encoding
 
 // Positions the engine and labels key off (virtual keycodes):
 // h=0x04 j=0x26 k=0x28 l=0x25 i=0x22 m=0x2E esc=0x35 return=0x24

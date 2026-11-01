@@ -14,7 +14,7 @@ pub struct PhysicalKey(pub u16);
 /// and virtual keycode 0x39 by coincidence, but F18 is usage 0x6D and virtual
 /// keycode 0x4F, and conflating the spaces breaks remaps silently.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
-pub struct HidUsage(pub u32);
+pub struct HidUsage(pub u64);
 
 /// Masked CGEvent modifier flags, opaque outside the platform backend.
 #[derive(Clone, Copy, PartialEq, Eq, Default, Debug)]
@@ -52,9 +52,11 @@ pub const ARROW_DOWN: PhysicalKey = PhysicalKey(0x7D);
 pub const ARROW_UP: PhysicalKey = PhysicalKey(0x7E);
 pub const M: PhysicalKey = PhysicalKey(0x2E);
 
-/// HID usages for the hidutil remap (keyboard page, 0x700000xx).
-pub const CAPS_USAGE: HidUsage = HidUsage(0x7000_0039);
-pub const F18_USAGE: HidUsage = HidUsage(0x7000_006D);
+/// HID usages for the hidutil remap. Apple TN2450 encodes a full usage as
+/// (usage_page << 32) | usage, so keyboard-page values are 36-bit: caps lock
+/// is 0x700000039 and F18 is 0x70000006D. u64 on purpose.
+pub const CAPS_USAGE: HidUsage = HidUsage(0x7_0000_0039);
+pub const F18_USAGE: HidUsage = HidUsage(0x7_0000_006D);
 
 /// US-ANSI position to glyph, for badges and labels only. Never used to
 /// interpret a keystroke. Positions without a printable glyph (F-keys,
@@ -138,15 +140,18 @@ mod tests {
     use super::*;
 
     /// The trap the architecture doc warns about: keycode 0x4F and HID usage
-    /// 0x7000006D both name F18, in different spaces.
+    /// 0x70000006D both name F18, in different spaces. The TN2450 encoding is
+    /// (usage_page << 32) | usage, so the usage constants are 36-bit.
     #[test]
     fn keycode_spaces_are_distinct_and_golden() {
         assert_eq!(F18, PhysicalKey(0x4F));
         assert_eq!(CAPS, PhysicalKey(0x39));
-        assert_eq!(F18_USAGE, HidUsage(0x7000_006D));
-        assert_eq!(CAPS_USAGE, HidUsage(0x7000_0039));
-        assert_ne!(F18.0 as u32, F18_USAGE.0);
-        assert_ne!(CAPS.0 as u32, CAPS_USAGE.0);
+        assert_eq!(F18_USAGE, HidUsage(0x7_0000_006D));
+        assert_eq!(CAPS_USAGE, HidUsage(0x7_0000_0039));
+        assert_eq!(F18_USAGE.0, 30064771181);
+        assert_eq!(CAPS_USAGE.0, 30064771129);
+        assert_ne!(F18.0 as u64, F18_USAGE.0);
+        assert_ne!(CAPS.0 as u64, CAPS_USAGE.0);
     }
 
     #[test]
