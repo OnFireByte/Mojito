@@ -128,6 +128,21 @@ pub fn set_needs_attention(flag: bool) {
     });
 }
 
+/// Activate this process: the settings child spawns without an activation
+/// ceremony, and its window must land frontmost and key.
+pub fn activate_self() {
+    use objc2::MainThreadMarker;
+    use objc2_app_kit::NSApplication;
+    let Some(mtm) = MainThreadMarker::new() else {
+        return;
+    };
+    // SAFETY: main thread, called after the run loop started.
+    #[allow(deprecated)] // activateIgnoringOtherApps is the reliable self-activation
+    unsafe {
+        NSApplication::sharedApplication(mtm).activateIgnoringOtherApps(true);
+    }
+}
+
 /// True when another process of this bundle is already running; activates
 /// it so the user lands somewhere visible. Two live instances would both
 /// intercept keys and fight over the overlay.

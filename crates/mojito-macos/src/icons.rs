@@ -23,8 +23,6 @@ unsafe extern "C" {
         bitmap_info: u32,
     ) -> *mut c_void;
     fn CGContextDrawImage(context: *mut c_void, rect: CGRect, image: ImageRef);
-    fn CGContextTranslateCTM(context: *mut c_void, x: f64, y: f64);
-    fn CGContextScaleCTM(context: *mut c_void, sx: f64, sy: f64);
 }
 
 #[repr(C)]
@@ -95,9 +93,8 @@ fn render_rgba(image: &objc2_app_kit::NSImage, size: u32) -> Option<Vec<u8>> {
             CGColorSpaceRelease(space);
             return None;
         }
-        // CG bitmaps have a bottom-up origin; flip so the icon is upright.
-        CGContextTranslateCTM(context, 0.0, f64::from(size));
-        CGContextScaleCTM(context, 1.0, -1.0);
+        // CG images draw upright into a bitmap context without a flip; the
+        // earlier translate+scale flip turned them upside down.
         CGContextDrawImage(
             context,
             CGRect { x: 0.0, y: 0.0, width: f64::from(size), height: f64::from(size) },

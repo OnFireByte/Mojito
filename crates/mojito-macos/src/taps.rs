@@ -288,8 +288,17 @@ unsafe extern "C" fn on_key_event(
         let Some(engine) = &mut state.engine else {
             return true;
         };
+        let raw = raw_from(event, event_type);
+        let actions = engine.on_event(raw);
+        // TEMP diagnosis: prove whether a hardware Esc reaches the engine.
+        if raw.key == mojito_core::ESC || raw.key == mojito_core::F18 {
+            eprintln!(
+                "mojito: tap key={} down={} first={:?}",
+                raw.key.0, raw.down, actions.first()
+            );
+        }
         let mut pass = true;
-        for action in engine.on_event(raw_from(event, event_type)) {
+        for action in actions {
             match action {
                 Action::Pass => pass = true,
                 Action::Swallow => pass = false,

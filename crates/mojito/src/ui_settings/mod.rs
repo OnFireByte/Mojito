@@ -184,7 +184,9 @@ pub fn opened(s: &mut SettingsState, tx: &mut Tx) {
 /// reserved reload keycode so the engine applies them live.
 pub fn run_child() {
     let store = Arc::new(ConfigStore::open(crate::settings_path()));
-    rune::run_windows_with_args(RunOptions { accessory: true }, Vec::new(), move |_| {
+    // Regular, not accessory: an accessory app's window cannot become key
+    // when it opens, so the settings window would start unfocused.
+    rune::run_windows_with_args(RunOptions { accessory: false }, Vec::new(), move |_| {
         // The state's handle wants a Hub; a detached windowless hub app
         // satisfies it without adding a surface. This process's lifetime
         // is the settings window's, so no keep_running.
@@ -197,7 +199,12 @@ pub fn run_child() {
                 move || SettingsState::new(store, hub)
             });
         let handle = app.handle();
-        let app = app.on_ready(move |_| handle.update(opened));
+        let app = app.on_ready(move |_| {
+            handle.update(opened);
+            // A process spawned from another app gets no activation
+            // ceremony; take focus once the window exists.
+            mojito_macos::activate_self();
+        });
         vec![
             WindowSpec::from_app("settings", app)
                 .configured_options(crate::app_spec::settings_window_options()),
