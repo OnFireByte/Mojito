@@ -691,9 +691,9 @@ fn _engine_must_be_send() {
     assert_send::<Action>();
 }
 
-// Two filter taps (HID head + session fallback) deliver one hardware event
-// twice; the second delivery must repeat the first decision without touching
-// the machine.
+// Three filter taps (HID head, session, annotated session) deliver one
+// hardware event up to three times; every delivery after the first must
+// repeat the first decision without touching the machine.
 #[test]
 fn duplicate_events_repeat_the_decision_without_side_effects() {
     let mut engine = standard_rig();
@@ -734,4 +734,49 @@ fn duplicate_events_repeat_the_decision_without_side_effects() {
             flags: ModifierFlags::NONE,
         })
     );
+}
+
+// A bare second caps press over the open overlay dismisses it.
+#[test]
+fn tapping_caps_again_dismisses_the_open_overlay() {
+    let mut engine = standard_rig();
+    engine.on_event(key(F18, true, 0));
+    engine.on_event(key(M, true, 50)); // ShowPinned
+    engine.on_event(key(F18, false, 100)); // sticky overlay
+
+    // The second caps press and release: fade, then Idle.
+    assert_eq!(engine.on_event(key(F18, true, 5_000)), vec![Action::Swallow]);
+    let up = engine.on_event(key(F18, false, 5_100));
+    assert_eq!(up.len(), 2);
+    assert_eq!(up[0], Action::Swallow);
+    assert!(matches!(ui(&up[1]), Some(UiMsg::HideFade)));
+
+    // Idle again: a caps tap synthesizes Esc as always.
+    assert_eq!(engine.on_event(key(F18, true, 6_000)), vec![Action::Swallow]);
+    let tap = engine.on_event(key(F18, false, 6_100));
+    assert_eq!(
+        synth(&tap[1]),
+        Some(SynthKey {
+            key: PhysicalKey(ESC),
+            down: true,
+            flags: ModifierFlags::NONE,
+        })
+    );
+}
+
+// Using a key during the second hold keeps the overlay open after release.
+#[test]
+fn using_a_key_during_the_second_hold_keeps_the_overlay() {
+    let mut engine = standard_rig();
+    engine.on_event(key(F18, true, 0));
+    engine.on_event(key(M, true, 50));
+    engine.on_event(key(F18, false, 100));
+
+    assert_eq!(engine.on_event(key(F18, true, 5_000)), vec![Action::Swallow]);
+    let toggle = engine.on_event(key(M, true, 5_050)); // m -> live list
+    assert!(matches!(ui(&toggle[1]), Some(UiMsg::ShowLive { .. })));
+    assert_eq!(engine.on_event(key(F18, false, 5_200)), vec![Action::Swallow]);
+    // Still in the overlay: Esc cancels with the fade.
+    let esc = engine.on_event(key(ESC, true, 5_400));
+    assert!(matches!(ui(&esc[1]), Some(UiMsg::HideFade)));
 }

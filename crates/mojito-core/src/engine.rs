@@ -68,9 +68,12 @@ enum Phase {
     },
     /// The switcher is visible and survives meta release: while it shows,
     /// every bare key is ours. F18 may be up or down under this phase.
+    /// `rearm` is a second meta press over the open overlay: a bare release
+    /// (no key used) dismisses the overlay, a used one keeps it.
     Overlay {
         overlay: OverlayPhase,
         committed: bool,
+        rearm: Option<(Mono, bool)>,
     },
 }
 
@@ -116,9 +119,9 @@ pub struct Engine {
     tables_version: u64,
     index: Arc<ArcSwap<crate::bridge::AppIndex>>,
     route: [Route; 256],
-    /// The previous event's identity and whether it passed. Two taps (the
-    /// HID-head filter and the session fallback) both see hardware keys;
-    /// a duplicate identity must not act twice.
+    /// The previous event's identity and whether it passed. Three filter
+    /// taps (HID head, session, annotated session) each see one hardware
+    /// event; a duplicate identity must not act twice.
     last: Option<(PhysicalKey, bool, Mono, bool)>,
     memory: LabelMemory,
     // The engine's output crosses to the UI and main thread inside the
@@ -170,8 +173,8 @@ impl Engine {
     /// - Any reset returns to Idle, clears routes, and hides the overlay.
     /// - An event identical to the previous one (same key, direction, and
     ///   timestamp) repeats the previous decision with no side effects: the
-    ///   HID-head tap and the session fallback both see one hardware event,
-    ///   and only the first delivery may act.
+    ///   three filter taps each see one hardware event, and only the first
+    ///   delivery may act.
     pub fn on_event(&mut self, ev: RawKey) -> Vec<Action> {
         self.refresh_tables();
         if let Some((key, down, t, passed)) = self.last {
@@ -212,8 +215,13 @@ impl Engine {
         } else {
             self.decide_up(ev, ix, committed)
         };
-        if let Phase::Armed { used, .. } = &mut self.phase {
-            *used = true;
+        match &mut self.phase {
+            Phase::Armed { used, .. } => *used = true,
+            Phase::Overlay {
+                rearm: Some((_, used)),
+                ..
+            } => *used = true,
+            _ => {}
         }
         actions
     }
@@ -255,24 +263,31 @@ impl Engine {
 
     fn on_f18(&mut self, ev: RawKey) -> Vec<Action> {
         if ev.down {
-            match &self.phase {
+            match &mut self.phase {
                 // Re-arm on a second down: tolerates duplicate evidence from
-                // the HID tap and gestures whose up a hotkey consumed.
+                // the taps and gestures whose up a hotkey consumed.
                 Phase::Idle | Phase::Armed { .. } => {
                     self.phase = Phase::Armed {
                         down_at: ev.t,
                         used: false,
                     };
                 }
-                // A down during an active hold or an open overlay is
-                // duplicate evidence only.
-                Phase::Held { .. } | Phase::Overlay { .. } => {}
+                // A down during an active hold is duplicate evidence only.
+                Phase::Held { .. } => {}
+                // A second meta press over the open overlay arms the
+                // bare-release dismissal.
+                Phase::Overlay { rearm, .. } => {
+                    if rearm.is_none() {
+                        *rearm = Some((ev.t, false));
+                    }
+                }
             }
             self.meta_down = true;
             return vec![Action::Swallow];
         }
         self.meta_down = false;
         let mut actions = vec![Action::Swallow];
+        let mut dismiss = false;
         match &self.phase {
             Phase::Idle => {}
             Phase::Armed { down_at, used } => {
@@ -291,11 +306,14 @@ impl Engine {
                 }
             }
             Phase::Held { .. } => {}
-            // The switcher is sticky: releasing meta leaves it open. Esc, a
-            // selection, or the control keycode ends it.
-            Phase::Overlay { .. } => {}
+            // A bare release of the second meta press dismisses the sticky
+            // overlay; a release after using keys keeps it open.
+            Phase::Overlay { rearm: Some((_, used)), .. } => dismiss = !*used,
+            Phase::Overlay { rearm: None, .. } => {}
         }
-        if !matches!(self.phase, Phase::Overlay { .. }) {
+        if dismiss {
+            actions.extend(self.cancel_state()); // HideFade; meta is up -> Idle
+        } else if !matches!(self.phase, Phase::Overlay { .. }) {
             self.phase = Phase::Idle;
         }
         actions
@@ -511,6 +529,7 @@ impl Engine {
         self.phase = Phase::Overlay {
             overlay: OverlayPhase::Pinned,
             committed: false,
+            rearm: None,
         };
         vec![
             Action::Swallow,
@@ -555,6 +574,7 @@ impl Engine {
         self.phase = Phase::Overlay {
             overlay: OverlayPhase::Live(Box::new(LiveModel { rows: rows.clone() })),
             committed: false,
+            rearm: None,
         };
         vec![
             Action::Swallow,

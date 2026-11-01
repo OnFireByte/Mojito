@@ -8,18 +8,19 @@ Mojito turns Caps Lock into the hub of machine control so the user reaches any t
 
 ## Shape in one paragraph
 
-Two threads. The tap thread owns two CGEventTaps (a HID-head filter and an annotated-session fallback), a health timer, and the entire decision engine, which runs inline in the tap callback as a pure state machine. The main thread runs rune (overlay panel, settings window, status item), NSWorkspace observers, and all AX/TIS/AppKit work drained from a job queue inside `AppSpec.poll`. The engine never blocks and never touches AppKit; the UI never parses a keystroke. Shared state flows one way through lock-free snapshots (`ArcSwap<Config>`, `ArcSwap<AppIndex>`), and the only engine-to-UI vocabulary is two message enums.
+Two threads. The tap thread owns three CGEventTaps (one filter per public tap point: HID head, session, annotated session), a health timer, and the entire decision engine, which runs inline in the tap callback as a pure state machine. The main thread runs rune (overlay panel, settings window, status item), NSWorkspace observers, and all AX/TIS/AppKit work drained from a job queue inside `AppSpec.poll`. The engine never blocks and never touches AppKit; the UI never parses a keystroke. Shared state flows one way through lock-free snapshots (`ArcSwap<Config>`, `ArcSwap<AppIndex>`), and the only engine-to-UI vocabulary is two message enums.
 
 ```
 tap thread                              main thread
 ┌─────────────────────────────┐   UiMsg  ┌──────────────────────────────┐
 │ HID tap (filter, head)      │ ───────► │ rune loop (poll drains jobs) │
-│ session tap (filter, fall-  │          │  ├ switcher overlay (prewarm)│
-│   back for injected keys)   │          │  ├ settings window           │
-│        │                    │   Job    │  ├ NSStatusItem              │
-│   Engine::on_event (pure)   │ ───────► │  ├ NSWorkspace observers ─┐  │
-│        │  Synth posts inline│          │  └ TIS / AX / activate    │  │
-│        ▼                    │          └──────────────────────────┼──┘
+│ session tap (filter)        │          │  ├ switcher overlay (prewarm)│
+│ annotated-session tap (fil- │          │  ├ settings window           │
+│   ter, last public point)   │          │  ├ NSStatusItem              │
+│        │                    │   Job    │  ├ NSWorkspace observers ─┐  │
+│   Engine::on_event (pure)   │ ───────► │  ├ TIS / AX / activate    │  │
+│        │  Synth posts inline│          │  └ (dedupe: same event    │  │
+│        ▼                    │          │     seen by every tap)    │  │
 │  ArcSwap<Config> (read)     │ ◄─── publishes ArcSwap<AppIndex> ───┘
 └─────────────────────────────┘
 ```
@@ -113,9 +114,8 @@ enum Route { Undecided, Pass, Swallow }
 /// - SHIFT-only chords are honored: meta+shift+h synthesizes shift+Left.
 /// - Autorepeat of a routed key re-synthesizes (held h = held Left).
 /// - An event identical to the previous one (same key, direction, timestamp)
-///   repeats the previous decision with no side effects: the HID-head tap
-///   and the session fallback both see one hardware event, and only the
-///   first delivery may act.
+///   repeats the previous decision with no side effects: the three filter
+///   taps each see one hardware event, and only the first delivery may act.
 /// - Any reset (tap invalidated, sleep, health-timer fire) returns to Idle,
 ///   clears `route`, and hides the overlay.
 pub fn on_event(&mut self, ev: RawKey) -> Vec<Action>;
@@ -232,13 +232,13 @@ The whole UX in one matrix. `route[key]` makes every down decision bind its up; 
 | esc | swallow | Cancel (HideFade) | Cancel (HideFade) |
 | any key, flags CMD/CTRL/OPT | Pass (and marks used) | Pass (and marks used) | Pass (and marks used) |
 | any other bare key | swallow | swallow | swallow |
-| F18 up | tap within tap_max_ms and !used -> synth Esc; else nothing -> Idle | overlay stays open | overlay stays open |
+| F18 up | tap within tap_max_ms and !used -> synth Esc; else nothing -> Idle | bare release of a re-press -> HideFade -> Idle; used release -> overlay stays open | overlay stays open |
 
-Commit = `Ui(Hide)` + `Job(Switch)` + `committed = true` while meta is held, or an immediate return to transparent Idle when the overlay was already sticky. Esc cancels with `HideFade`. The overlay is sticky: releasing meta leaves it open, and while it shows the engine owns every bare key; Esc, a selection, or the control keycode closes it. Click-to-cancel reaches the engine because the UI posts an unmarked synthetic keyDown on the reserved unassigned `CONTROL` keycode, which the tap swallows and turns into a cancel.
+Commit = `Ui(Hide)` + `Job(Switch)` + `committed = true` while meta is held, or an immediate return to transparent Idle when the overlay was already sticky. Esc cancels with `HideFade`. The overlay is sticky: releasing meta leaves it open, and while it shows the engine owns every bare key; Esc, a selection, the control keycode, or a bare second caps press (F18 re-pressed and released without using a key) closes it with `HideFade` — using any key during that second hold keeps the overlay open instead. Click-to-cancel reaches the engine because the UI posts an unmarked synthetic keyDown on the reserved unassigned `CONTROL` keycode, which the tap swallows and turns into a cancel.
 
 ## macOS backend
 
-- **Taps** (`mojito-macos::taps`): two filter taps on one CFRunLoop thread sharing one callback. The key tap sits at `kCGHIDEventTap` with head insertion, mask = keyDown | keyUp: the head of the HID chain, because another app's HID-level key filter (iTerm2's hotkey window) otherwise consumes keys before any session tap sees them. The fallback tap sits at `kCGAnnotatedSessionEventTap`, same mask and callback: it catches keys injected above the HID level that no hardware produced (Touch-Bar-style Esc, driver-synthesized keys). One hardware event therefore crosses both taps when passed; the engine deduplicates by event identity (key, direction, timestamp) and repeats the first decision without side effects. flagsChanged is never filtered (an active filtering tap there breaks Finder's Option menus even on pass-through). Callbacks never block: pure `on_event` inline, `Synth` posted inline, `Ui`/`Job` over unbounded channels with `try_send` plus a waker poke. A 5 s health timer re-enables taps macOS silently disabled and recreates invalidated ones (either tap's gap is a coverage interruption, so the engine resets), then injects `Reset` so the engine returns to Idle and the overlay hides. App Nap opted out on the tap thread only (`UserInitiatedAllowingIdleSystemSleep`). Readiness over a `sync_channel` with a 2 s timeout; the session tap failing to create degrades to HID-only with a log line.
+- **Taps** (`mojito-macos::taps`): three filter taps on one CFRunLoop thread sharing one callback, one per public tap point. The HID tap sits at `kCGHIDEventTap` with head insertion: the head of the HID chain, because another app's HID-level key filter (iTerm2's hotkey window) otherwise consumes keys before any session tap sees them. The session tap sits at `kCGSessionEventTap`, head-inserted ahead of the system's own session filters (Siri, SiriNCService hold session-level key filters). The annotated-session tap sits at `kCGAnnotatedSessionEventTap`, the last public point before apps. Mask everywhere = keyDown | keyUp. An injected key (Touch-Bar-style Esc, driver-synthesized keys) can enter at any of the three points; together they cover every path a key can take to an app, and one hardware event crosses all three when passed — the engine deduplicates by event identity (key, direction, timestamp) and repeats the first decision without side effects. flagsChanged is never filtered (an active filtering tap there breaks Finder's Option menus even on pass-through). Callbacks never block: pure `on_event` inline, `Synth` posted inline, `Ui`/`Job` over unbounded channels with `try_send` plus a waker poke. A 5 s health timer re-enables taps macOS silently disabled and recreates invalidated ones (any tap's gap is a coverage interruption, so the engine resets), then injects `Reset` so the engine returns to Idle and the overlay hides. App Nap opted out on the tap thread only (`UserInitiatedAllowingIdleSystemSleep`). Readiness over a `sync_channel` with a 2 s timeout; the session and annotated taps failing to create degrades to fewer taps with a log line.
 - **Synthesis** (`mojito-macos::synth`): `CGEventCreateKeyboardEvent` + `CGEventSetFlags` + `CGEventSetIntegerValueField(kCGKeyboardEventIntegerFieldEventSourceUserData = 42, MARKER)` + `CGEventPost(kCGHIDEventTap)`. Marker `0x004D_4F4A_3154` ("MOJ1T"); the tap ignores marked events so we never intercept our own output. No chord-breaker posting: F18 is not a modifier, so no system modifier state is ever held and no app can fire a modifier hotkey on meta. The primitive stays available for a future keycode-57 fallback mode.
 - **Caps remap** (`mojito-macos::caps`): `hidutil property --get UserKeyMapping`, merge our `{src: 0x70000039, dst: 0x7000006D}` entry preserving foreign entries, `--set` (no root needed). Persist with `~/Library/LaunchAgents/com.mojito.caps.plist` (RunAtLoad, runs the same set), loaded via `launchctl bootstrap gui/$(id -u)`. Self-heal: a periodic `is_active()` check reinstalls and badges the status item if the mapping vanished (Sequoia Login-Items consent can disable the agent). Uninstall removes only our entry, matched on `Src == CAPS_USAGE` (a user may remap something else TO F18), boots out the agent, deletes the plist. Capture-off toggle restores stock Caps Lock.
 - **App index** (`mojito-macos::index`): main thread maintains a recency ring of running regular apps from NSWorkspace activation/launch/terminate observations and publishes `ArcSwap<AppIndex>`; `Job::RefreshWindowCounts` adds CGWindowList layer-0 window counts per pid when Pinned mode opens, so they are fresh by the time the user presses m again. The count spans every Space (`kCGWindowListOptionAll` + `kCGWindowListExcludeDesktopElements`, minimized windows included): an on-screen-only count saw one app when the frontmost Space was fullscreen, which emptied the live list. Live list = regular apps with at least one window on any Space, frontmost excluded, recency order. No `kCGWindowName` reads anywhere (it demands Screen Recording permission).
@@ -258,7 +258,7 @@ Commit = `Ui(Hide)` + `Job(Switch)` + `committed = true` while meta is held, or 
 
 ## Process shape
 
-- Threads: main (rune AppKit loop, observers, status item, windows, all TIS/AX/activation via jobs) and tap (two taps, health timer, engine inline). Nothing else. Idle CPU about zero: run loops park, hidden prewarmed overlays run handler frames without drawing and pace themselves (rune `overlay/options.rs:179`, `overlay/more_tests.rs:119` — verified in source), `poll` returns false when nothing drained, the permission poll stops after the grant.
+- Threads: main (rune AppKit loop, observers, status item, windows, all TIS/AX/activation via jobs) and tap (three taps, health timer, engine inline). Nothing else. Idle CPU about zero: run loops park, hidden prewarmed overlays run handler frames without drawing and pace themselves (rune `overlay/options.rs:179`, `overlay/more_tests.rs:119` — verified in source), `poll` returns false when nothing drained, the permission poll stops after the grant.
 - Quit discipline (hex `macos_rune.rs:498-528`): observe `NSApplicationWillTerminateNotification` before the loop runs; on quit, flip the shutdown flag, stop the taps, restore the hidutil mapping if capture is off, join the tap thread bounded, then `_exit(0)`.
 - Packaging: `scripts/build-app.sh` mirrors hex's `build-app.sh`: `cargo build --release`, assemble `Mojito.app/Contents/{MacOS,Resources}`, Info.plist with `CFBundleIdentifier`, `CFBundleExecutable`, `LSUIElement=true`, `LSMinimumSystemVersion 15.0`, `NSAccessibilityUsageDescription`; ad-hoc `codesign --force --sign -`. Bundle before first run so the TCC grant attaches to the bundle id. `scripts/check` runs fmt, clippy `-D warnings`, and tests. Files stay under 800 non-test lines.
 
