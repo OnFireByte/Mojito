@@ -197,7 +197,7 @@ pub fn run_child() {
                 move || SettingsState::new(store, hub)
             });
         let handle = app.handle();
-        let app = app.on_ready(move |_| handle.update(|s, tx| opened(s, tx)));
+        let app = app.on_ready(move |_| handle.update(opened));
         vec![
             WindowSpec::from_app("settings", app)
                 .configured_options(crate::app_spec::settings_window_options()),
