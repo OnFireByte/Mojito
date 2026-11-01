@@ -26,8 +26,6 @@ unsafe extern "C" {
     fn CGContextTranslateCTM(context: *mut c_void, x: f64, y: f64);
     fn CGContextScaleCTM(context: *mut c_void, sx: f64, sy: f64);
     fn CGBitmapContextCreateImageData(context: *mut c_void) -> ImageRef;
-    fn CFDataGetBytePtr(data: ImageRef) -> *const u8;
-    fn CFDataGetLength(data: ImageRef) -> isize;
     fn CFRelease(value: ImageRef);
 }
 
@@ -107,20 +105,7 @@ fn render_rgba(image: &objc2_app_kit::NSImage, size: u32) -> Option<Vec<u8>> {
             CGRect { x: 0.0, y: 0.0, width: f64::from(size), height: f64::from(size) },
             cg,
         );
-        let data = CGBitmapContextCreateImageData(context);
-        let bytes = if data.is_null() {
-            None
-        } else {
-            let length = CFDataGetLength(data);
-            if length <= 0 {
-                None
-            } else {
-                Some(std::slice::from_raw_parts(CFDataGetBytePtr(data), length as usize).to_vec())
-            }
-        };
-        CFRelease(data);
-        CFRelease(context);
-        CGColorSpaceRelease(space);
-        bytes
+        // The context drew straight into `buffer`; no copy call needed.
+        Some(buffer)
     }
 }

@@ -7,7 +7,7 @@ edition.workspace = true
 mojito-core = { path = "../mojito-core" }
 mojito-macos = { path = "../mojito-macos" }
 arc-swap.workspace = true
-rune = { git = "https://github.com/anomalyco/rune", rev = "092dec2e40436d6835fe25ebc8a994fe67f3c9e4" }
+rune = { git = "https://github.com/anomalyco/rune", rev = "092dec2e40436d6835fe25ebc8a994fe67f3c9e4", default-features = false, features = ["embedded-fonts", "metal-backend"] }
 rune-kit = { git = "https://github.com/anomalyco/rune", rev = "092dec2e40436d6835fe25ebc8a994fe67f3c9e4" }
 rune-theme-opencode = { git = "https://github.com/anomalyco/rune", rev = "092dec2e40436d6835fe25ebc8a994fe67f3c9e4" }
 serde.workspace = true

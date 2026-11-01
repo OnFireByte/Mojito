@@ -83,6 +83,9 @@ fn main() {
     let (menu_tx, menu_rx) = mpsc::sync_channel::<status_item::MenuAction>(8);
 
     rune::run_windows_with(RunOptions { accessory: true }, move |displays| {
+        // No hub window: a windowless shell needs no surface, and every
+        // surface owns a multi-megabyte glyph atlas.
+        let windows: Vec<rune::WindowSpec<Hub>> = Vec::new();
         let displays: Vec<Display> = displays
             .iter()
             .map(|d| {
@@ -170,7 +173,7 @@ fn main() {
             displays,
             icons: std::collections::HashMap::new(),
         });
-        vec![WindowSpec::from_app("hub", app)]
+        windows
     });
 }
 
