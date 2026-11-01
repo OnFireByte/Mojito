@@ -113,6 +113,9 @@ fn main() {
         });
 
         let settings_app = App::new(app_spec::settings_spec())
+            // Deferred surface: the app exists but its window keeps no
+            // framebuffer until it is first opened.
+            .windowless()
             .standard_menus()
             .on_close(ui_settings::closed)
             .init({

@@ -3,9 +3,10 @@
 
 use super::*;
 
-// Mojito: 1024 keeps a glyph page at 1 MB instead of 4 MB (CPU copy and GPU
-// texture); three idle renderers otherwise hold 12 MB of blank atlas.
-pub const ATLAS_SIZE: u32 = 1024;
+// Mojito: 512 keeps a glyph page at 256 KB instead of 4 MB (CPU copy and
+// GPU texture); three idle renderers otherwise hold megabytes of blank
+// atlas. Glyphs that do not fit spill to a fresh page.
+pub const ATLAS_SIZE: u32 = 512;
 
 /// Looked up for every glyph of every frame, so hashed with Fx rather than SipHash.
 pub(super) type GlyphMap<V> = HashMap<GlyphKey, V, std::hash::BuildHasherDefault<rune_motion::Fx>>;

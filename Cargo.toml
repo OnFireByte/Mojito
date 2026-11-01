@@ -19,7 +19,7 @@ block2 = "0.6.2"
 
 [patch.'https://github.com/anomalyco/rune']
 # Vendored rune (see vendor/rune/README-mojito.md): smaller text and image
-# atlas pages, everything else identical to rev 092dec2.
+# atlas pages (512), everything else identical to rev 092dec2.
 rune = { path = "vendor/rune/crates/rune" }
 rune-kit = { path = "vendor/rune/crates/rune-kit" }
 rune-theme-opencode = { path = "vendor/rune/themes/opencode" }
