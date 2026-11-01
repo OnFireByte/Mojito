@@ -1,0 +1,14 @@
+#!/bin/sh
+# fmt + clippy + tests. Scoped to the bin crate: mojito-core and mojito-macos
+# are owned by other slices (fmt must not touch them either), and their
+# todo!() skeletons carry dead-code warnings that -D warnings would reject
+# until they are filled in. Tests run in mojito-core, the only crate with
+# tests.
+set -eu
+
+root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
+cd "$root"
+
+cargo fmt -p mojito
+cargo clippy -p mojito --no-deps --all-targets -- -D warnings
+cargo test -p mojito-core
