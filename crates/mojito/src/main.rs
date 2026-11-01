@@ -56,6 +56,10 @@ fn main() {
                 }
             };
             mojito_macos::synth::post_raw(code, down);
+            // The window server routes a posted event through the HID taps
+            // asynchronously; exiting this process immediately races the
+            // delivery and can drop the event.
+            std::thread::sleep(std::time::Duration::from_millis(60));
             return;
         }
         Some("settings") => {

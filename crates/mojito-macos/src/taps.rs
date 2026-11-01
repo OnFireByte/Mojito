@@ -1,10 +1,13 @@
-//! Event taps on one CFRunLoop thread, plus the health timer. Our filter
-//! tap sits at the HID level, inserted first: another app's HID-level key
-//! filter (iTerm2's hotkey window) otherwise consumes keys before we see
-//! them. flagsChanged is never filtered (an active filtering tap there
-//! breaks Finder's Option menus even on pass-through). Callbacks never
-//! block: pure engine inline, synth posted inline, Ui/Job over channels
-//! with a waker poke.
+//! Event taps on one CFRunLoop thread, plus the health timer. Two filter
+//! taps share one callback: the HID-head tap sees hardware keys first —
+//! another app's HID-level key filter (iTerm2's hotkey window) otherwise
+//! consumes keys before any session tap sees them — and the
+//! annotated-session tap catches keys injected above the HID level that
+//! never cross HID taps (Touch-Bar-style Esc, driver-synthesized keys). The
+//! engine deduplicates the double delivery by event identity. flagsChanged
+//! is never filtered (an active filtering tap there breaks Finder's Option
+//! menus even on pass-through). Callbacks never block: pure engine inline,
+//! synth posted inline, Ui/Job over channels with a waker poke.
 
 use std::cell::RefCell;
 use std::ffi::c_void;
@@ -40,6 +43,9 @@ const KEYBOARD_EVENT_AUTOREPEAT: u32 = 8;
 const TAP_DISABLED_BY_TIMEOUT: u32 = u32::MAX - 1;
 const TAP_DISABLED_BY_USER_INPUT: u32 = u32::MAX;
 const HID_EVENT_TAP: u32 = 0;
+/// `kCGAnnotatedSessionEventTap`: session-level events, including keys
+/// injected above the HID level that no hardware produced.
+const ANNOTATED_SESSION_EVENT_TAP: u32 = 2;
 const HEAD_INSERT_EVENT_TAP: u32 = 0;
 const DEFAULT_EVENT_TAP: u32 = 0;
 const KEY_MASK: u64 = (1_u64 << EVENT_KEY_DOWN) | (1_u64 << EVENT_KEY_UP);
@@ -144,7 +150,13 @@ thread_local! {
         jobs: None,
         ui_wake: None,
         job_wake: None,
-        taps: TapSet { run_loop: ptr::null_mut(), key: None, key_failing: false },
+        taps: TapSet {
+            run_loop: ptr::null_mut(),
+            key: None,
+            session: None,
+            key_failing: false,
+            session_failing: false,
+        },
     });
 }
 
@@ -205,6 +217,11 @@ fn run(deps: TapDeps, ready: SyncSender<Result<(), String>>) {
             "could not create the key event tap ({message}); grant Accessibility permission"
         )));
         return;
+    }
+    if let Err(message) = TAP.with_borrow_mut(|state| state.taps.attach_session()) {
+        // The session tap only catches keys injected above the HID level;
+        // hardware keys still work without it.
+        eprintln!("mojito-macos: could not create the session fallback tap: {message}");
     }
 
     let _health = HealthTimer::start(run_loop);
@@ -283,13 +300,12 @@ unsafe extern "C" fn on_key_event(
         };
         let raw = raw_from(event, event_type);
         let actions = engine.on_event(raw);
-        // TEMP diagnosis: prove whether a hardware Esc reaches the engine.
-        if raw.key == mojito_core::ESC || raw.key == mojito_core::F18 {
-            eprintln!(
-                "mojito: tap key={} down={} first={:?}",
-                raw.key.0, raw.down, actions.first()
-            );
-        }
+        // TEMP diagnosis: log every key event with the engine's decision,
+        // to see what the operator's Esc key actually sends.
+        eprintln!(
+            "mojito: tap key={} down={} first={:?}",
+            raw.key.0, raw.down, actions.first()
+        );
         let mut pass = true;
         for action in actions {
             match action {
@@ -458,12 +474,16 @@ impl Drop for Attached {
     }
 }
 
-/// The key tap on the event-tap thread, checked by its health timer.
+/// The two filter taps on the event-tap thread, checked by the health timer.
 struct TapSet {
     run_loop: *mut c_void,
+    /// HID-head filter: hardware keys reach it first.
     key: Option<Attached>,
+    /// Annotated-session filter: keys injected above the HID level.
+    session: Option<Attached>,
     /// Creation failed and was logged; log again only once it recovers.
     key_failing: bool,
+    session_failing: bool,
 }
 
 impl TapSet {
@@ -483,10 +503,25 @@ impl TapSet {
         Ok(())
     }
 
+    fn attach_session(&mut self) -> Result<(), &'static str> {
+        // SAFETY: as `attach_key`.
+        let attached = unsafe {
+            Attached::create(
+                ANNOTATED_SESSION_EVENT_TAP,
+                DEFAULT_EVENT_TAP,
+                KEY_MASK,
+                on_key_event,
+                self.run_loop,
+            )
+        }?;
+        self.session = Some(attached);
+        Ok(())
+    }
+
     /// Re-enable all taps after macOS disabled one without notice.
     fn reenable_all(&mut self) -> bool {
         let mut reenabled = false;
-        for attached in [&mut self.key].into_iter().flatten() {
+        for attached in [&mut self.key, &mut self.session].into_iter().flatten() {
             // SAFETY: `tap` is a live CFMachPort owned by `Attached`.
             unsafe { CGEventTapEnable(attached.tap, true) };
             reenabled = true;
@@ -494,58 +529,79 @@ impl TapSet {
         reenabled
     }
 
-    /// Re-enable a disabled tap, recreate an invalidated or missing one.
-    /// Returns whether the key tap's coverage was interrupted, which makes
-    /// the engine's state untrustworthy and calls for a reset.
+    /// Re-enable disabled taps, recreate invalidated or missing ones.
+    /// Returns whether any tap's coverage was interrupted, which makes the
+    /// engine's state untrustworthy and calls for a reset.
     fn check(&mut self) -> bool {
-        self.maintain_key_tap()
+        let run_loop = self.run_loop;
+        let key_gap = maintain(
+            (&mut self.key, &mut self.key_failing),
+            HID_EVENT_TAP,
+            "key",
+            run_loop,
+        );
+        let session_gap = maintain(
+            (&mut self.session, &mut self.session_failing),
+            ANNOTATED_SESSION_EVENT_TAP,
+            "session",
+            run_loop,
+        );
+        key_gap | session_gap
     }
+}
 
-    fn maintain_key_tap(&mut self) -> bool {
-        let mut interrupted = false;
-        let recreate = match &self.key {
-            None => true,
-            Some(attached) => {
-                // SAFETY: `tap` is a live CFMachPort owned by `Attached`.
-                if unsafe { CFMachPortIsValid(attached.tap) } == 0 {
-                    true
-                } else if unsafe { CGEventTapIsEnabled(attached.tap) } == 0 {
-                    // SAFETY: as above.
-                    unsafe { CGEventTapEnable(attached.tap, true) };
-                    // SAFETY: as above.
-                    let enabled = unsafe { CGEventTapIsEnabled(attached.tap) } != 0;
-                    interrupted = true;
-                    !enabled
-                } else {
-                    false
-                }
+/// Keep one tap alive: re-enable a disabled tap, recreate an invalidated or
+/// missing one. Returns whether its coverage was interrupted.
+fn maintain(
+    slot: (&mut Option<Attached>, &mut bool),
+    location: u32,
+    name: &str,
+    run_loop: *mut c_void,
+) -> bool {
+    let (slot, failing) = slot;
+    let mut interrupted = false;
+    let recreate = match slot {
+        None => true,
+        Some(attached) => {
+            // SAFETY: `tap` is a live CFMachPort owned by `Attached`.
+            if unsafe { CFMachPortIsValid(attached.tap) } == 0 {
+                true
+            } else if unsafe { CGEventTapIsEnabled(attached.tap) } == 0 {
+                // SAFETY: as above.
+                unsafe { CGEventTapEnable(attached.tap, true) };
+                // SAFETY: as above.
+                let enabled = unsafe { CGEventTapIsEnabled(attached.tap) } != 0;
+                interrupted = true;
+                !enabled
+            } else {
+                false
             }
-        };
-        if recreate {
-            let was_attached = self.key.take().is_some();
-            interrupted |= was_attached;
-            // SAFETY: the run loop is the calling thread's and the state
-            // outlives the tap.
-            match unsafe { Attached::create(HID_EVENT_TAP, DEFAULT_EVENT_TAP, KEY_MASK, on_key_event, self.run_loop) } {
-                Ok(attached) => {
-                    if was_attached {
-                        eprintln!("mojito-macos: recreated the key event tap");
-                    }
-                    self.key_failing = false;
-                    self.key = Some(attached);
-                }
-                Err(message) => {
-                    if !self.key_failing {
-                        eprintln!("mojito-macos: could not recreate the key event tap: {message}");
-                    }
-                    self.key_failing = true;
-                }
-            }
-        } else {
-            self.key_failing = false;
         }
-        interrupted
+    };
+    if recreate {
+        let was_attached = slot.take().is_some();
+        interrupted |= was_attached;
+        // SAFETY: the run loop is the calling thread's and the state
+        // outlives the tap.
+        match unsafe { Attached::create(location, DEFAULT_EVENT_TAP, KEY_MASK, on_key_event, run_loop) } {
+            Ok(attached) => {
+                if was_attached {
+                    eprintln!("mojito-macos: recreated the {name} event tap");
+                }
+                *failing = false;
+                *slot = Some(attached);
+            }
+            Err(message) => {
+                if !*failing {
+                    eprintln!("mojito-macos: could not recreate the {name} event tap: {message}");
+                }
+                *failing = true;
+            }
+        }
+    } else {
+        *failing = false;
     }
+    interrupted
 }
 
 /// The repeating run-loop timer that runs `TapSet::check`.

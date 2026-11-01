@@ -690,3 +690,48 @@ fn _engine_must_be_send() {
     assert_send::<RawKey>();
     assert_send::<Action>();
 }
+
+// Two filter taps (HID head + session fallback) deliver one hardware event
+// twice; the second delivery must repeat the first decision without touching
+// the machine.
+#[test]
+fn duplicate_events_repeat_the_decision_without_side_effects() {
+    let mut engine = standard_rig();
+
+    // Idle pass-through: duplicated, and the route up still passes.
+    let a = key(0x00, true, 1_000);
+    assert_eq!(engine.on_event(a), vec![Action::Pass]);
+    assert_eq!(engine.on_event(a), vec![Action::Pass]);
+    assert_eq!(engine.on_event(key(0x00, false, 1_100)), vec![Action::Pass]);
+
+    // A hold that opens the overlay: the duplicated m-down must not open it
+    // twice (a second decision here would toggle straight to the live list).
+    assert_eq!(engine.on_event(key(F18, true, 2_000)), vec![Action::Swallow]);
+    let open = engine.on_event(key(M, true, 2_050));
+    assert!(matches!(ui(&open[1]), Some(UiMsg::ShowPinned { .. })));
+    assert_eq!(engine.on_event(key(M, true, 2_050)), vec![Action::Swallow]);
+
+    // The sticky overlay survives meta release; the duplicated Esc-down must
+    // not fade twice.
+    assert_eq!(engine.on_event(key(F18, false, 2_100)), vec![Action::Swallow]);
+    let cancel = engine.on_event(key(ESC, true, 3_000));
+    assert_eq!(cancel.len(), 2);
+    assert_eq!(cancel[0], Action::Swallow);
+    assert!(matches!(ui(&cancel[1]), Some(UiMsg::HideFade)));
+    assert_eq!(engine.on_event(key(ESC, true, 3_000)), vec![Action::Swallow]);
+    assert_eq!(engine.on_event(key(ESC, false, 3_050)), vec![Action::Swallow]);
+
+    // Idle again: a fresh Esc passes, and a fresh meta tap still synthesizes
+    // Esc — no stale overlay state.
+    assert_eq!(engine.on_event(key(ESC, true, 4_000)), vec![Action::Pass]);
+    assert_eq!(engine.on_event(key(F18, true, 4_100)), vec![Action::Swallow]);
+    let tap_esc = engine.on_event(key(F18, false, 4_200));
+    assert_eq!(
+        synth(&tap_esc[1]),
+        Some(SynthKey {
+            key: PhysicalKey(ESC),
+            down: true,
+            flags: ModifierFlags::NONE,
+        })
+    );
+}

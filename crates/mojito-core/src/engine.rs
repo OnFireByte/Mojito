@@ -116,6 +116,10 @@ pub struct Engine {
     tables_version: u64,
     index: Arc<ArcSwap<crate::bridge::AppIndex>>,
     route: [Route; 256],
+    /// The previous event's identity and whether it passed. Two taps (the
+    /// HID-head filter and the session fallback) both see hardware keys;
+    /// a duplicate identity must not act twice.
+    last: Option<(PhysicalKey, bool, Mono, bool)>,
     memory: LabelMemory,
     // The engine's output crosses to the UI and main thread inside the
     // returned `Vec<Action>`; the tap callback routes Ui/Job variants over
@@ -147,6 +151,7 @@ impl Engine {
             tables_version,
             index,
             route: [Route::Undecided; 256],
+            last: None,
             memory,
             ui,
             jobs,
@@ -163,8 +168,26 @@ impl Engine {
     /// - SHIFT-only chords are honored on routed keys.
     /// - Autorepeat of a routed key re-synthesizes.
     /// - Any reset returns to Idle, clears routes, and hides the overlay.
+    /// - An event identical to the previous one (same key, direction, and
+    ///   timestamp) repeats the previous decision with no side effects: the
+    ///   HID-head tap and the session fallback both see one hardware event,
+    ///   and only the first delivery may act.
     pub fn on_event(&mut self, ev: RawKey) -> Vec<Action> {
         self.refresh_tables();
+        if let Some((key, down, t, passed)) = self.last {
+            if key == ev.key && down == ev.down && t == ev.t {
+                // The other tap already decided this exact event.
+                return if passed { vec![Action::Pass] } else { vec![Action::Swallow] };
+            }
+        }
+        let actions = self.decide(ev);
+        let passed = !matches!(actions.first(), Some(Action::Swallow));
+        self.last = Some((ev.key, ev.down, ev.t, passed));
+        actions
+    }
+
+    /// The fresh-event decision: dispatch on F18 and the routable key space.
+    fn decide(&mut self, ev: RawKey) -> Vec<Action> {
         if ev.key == F18 {
             return self.on_f18(ev);
         }
@@ -200,6 +223,7 @@ impl Engine {
         self.phase = Phase::Idle;
         self.meta_down = false;
         self.route = [Route::Undecided; 256];
+        self.last = None;
         vec![Action::Ui(UiMsg::Hide)]
     }
 

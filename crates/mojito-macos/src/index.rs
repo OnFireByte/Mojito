@@ -19,8 +19,7 @@ use mojito_core::bridge::{AppIndex, AppSlot};
 
 type Observer = Retained<ProtocolObject<dyn NSObjectProtocol>>;
 
-/// `kCGWindowListOptionOnScreenOnly`; layer 0 is normal windows.
-const ON_SCREEN_ONLY: u32 = 1 << 0;
+/// `kCGWindowLayer` for normal windows.
 const LAYER_NORMAL: i64 = 0;
 
 #[link(name = "CoreGraphics", kind = "framework")]
@@ -119,7 +118,12 @@ impl AppIndexHandle {
             eprintln!("mojito-macos: window counts require the main thread");
             return;
         }
-        let counts = on_screen_window_counts();
+        let counts = window_counts();
+        eprintln!(
+            "mojito: ring {} apps, {} with windows", // TEMP diagnosis
+            self.ring.lock().unwrap_or_else(|e| e.into_inner()).len(),
+            counts.values().filter(|c| **c > 0).count()
+        );
         {
             let mut ring = self.ring.lock().unwrap_or_else(|error| error.into_inner());
             for slot in ring.iter_mut() {
@@ -222,12 +226,18 @@ fn observed_app(note: &NSNotification) -> Option<Retained<NSRunningApplication>>
     Some(unsafe { Retained::cast_unchecked::<NSRunningApplication>(object) })
 }
 
-/// Layer-0 on-screen window counts keyed by owning pid. Minimized and
-/// hidden apps' windows are not on-screen, matching the Live-list rule.
-fn on_screen_window_counts() -> HashMap<i32, u8> {
+/// `kCGWindowListOptionAll` (0) plus `kCGWindowListExcludeDesktopElements`
+/// (1 << 4): windows on every Space, desktop and wallpaper excluded. An
+/// on-screen-only count saw one app when the user was in a fullscreen
+/// Space, which emptied the live list.
+const ALL_SPACES: u32 = 0 | (1 << 4);
+
+/// Layer-0 window counts keyed by owning pid. Minimized windows still
+/// count (their app is switchable); windows on other Spaces count too.
+fn window_counts() -> HashMap<i32, u8> {
     let mut counts = HashMap::new();
     // SAFETY: CoreGraphics returns a +1 CFArray of CFDictionary window info.
-    let list = unsafe { CGWindowListCopyWindowInfo(ON_SCREEN_ONLY, 0) };
+    let list = unsafe { CGWindowListCopyWindowInfo(ALL_SPACES, 0) };
     if list.is_null() {
         return counts;
     }
@@ -330,7 +340,7 @@ fn process_name(pid: i32) -> String {
 }
 pub fn debug_windows() {
     // SAFETY: CoreGraphics returns a +1 CFArray of CFDictionary window info.
-    let list = unsafe { CGWindowListCopyWindowInfo(ON_SCREEN_ONLY, 0) };
+    let list = unsafe { CGWindowListCopyWindowInfo(0, 0) };
     if list.is_null() {
         println!("no window list");
         return;
