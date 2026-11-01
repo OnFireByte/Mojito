@@ -17,7 +17,7 @@ When user pressing meta+m, the overlay will pop up to let user choose which app 
 
 1. User list the apps they want to show in overlay in the Mojito setting app.
 2. User could choose the app by using pre-defined key for that app.
-3. User could press m again after meta + m to change the mode from pre-defined app to currently open apps with assigned label keys (not from the user defined key, but consistent and use the key that's easier to reach first using colemak-dh idea.
+3. User could press m again after meta + m to change the mode from pre-defined app to currently open apps with assigned label keys (not from the user defined key, but consistent and use the key that's easier to reach first using colemak-dh idea).
 
 # Tech Stack
 

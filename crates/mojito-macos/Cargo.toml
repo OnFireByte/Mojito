@@ -11,8 +11,6 @@ objc2-core-foundation.workspace = true
 objc2-foundation.workspace = true
 objc2-service-management.workspace = true
 block2.workspace = true
-core-graphics-types.workspace = true
-serde_json.workspace = true
 
 # AppKit types the backend touches directly: status item, workspace/index,
 # running applications. Features are additive to the workspace defaults.

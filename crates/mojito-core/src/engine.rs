@@ -60,9 +60,15 @@ enum Phase {
         down_at: Mono,
         used: bool,
     },
-    /// `committed` makes the rest of the hold inert after a switch, so
-    /// leftover autorepeats never type into the app we just landed on.
-    Meta {
+    /// Meta layer active, overlay hidden: bound chords route, unbound keys
+    /// stay silent. `committed` makes the rest of the hold inert after a
+    /// switch so leftover autorepeats never type into the app we landed on.
+    Held {
+        committed: bool,
+    },
+    /// The switcher is visible and survives meta release: while it shows,
+    /// every bare key is ours. F18 may be up or down under this phase.
+    Overlay {
         overlay: OverlayPhase,
         committed: bool,
     },
@@ -102,6 +108,10 @@ const CHORD: ModifierFlags =
 
 pub struct Engine {
     phase: Phase,
+    /// Whether F18 is physically down right now, independent of the phase:
+    /// the overlay survives its release, and commit/cancel land differently
+    /// depending on whether meta is still held.
+    meta_down: bool,
     config: Arc<ArcSwap<Config>>,
     tables: Tables,
     tables_version: u64,
@@ -132,6 +142,7 @@ impl Engine {
         let memory = config_snapshot.label_memory.clone();
         Engine {
             phase: Phase::Idle,
+            meta_down: false,
             config,
             tables,
             tables_version,
@@ -164,10 +175,7 @@ impl Engine {
         }
         let committed = matches!(
             &self.phase,
-            Phase::Meta {
-                committed: true,
-                ..
-            }
+            Phase::Held { committed: true } | Phase::Overlay { committed: true, .. }
         );
         let actions = if ev.down && !ev.repeat {
             match &self.phase {
@@ -191,8 +199,25 @@ impl Engine {
     /// Health-timer and wake-from-sleep recovery: back to Idle, overlay hidden.
     pub fn reset(&mut self) -> Vec<Action> {
         self.phase = Phase::Idle;
+        self.meta_down = false;
         self.route = [Route::Undecided; 256];
         vec![Action::Ui(UiMsg::Hide)]
+    }
+
+    /// The switcher's click-to-cancel control path. The UI cannot reach the
+    /// engine directly, so it posts the reserved control keycode and the tap
+    /// calls this. No-op unless an uncommitted overlay is open.
+    pub fn cancel_overlay(&mut self) -> Vec<Action> {
+        if matches!(self.phase, Phase::Overlay { committed: false, .. }) {
+            self.phase = if self.meta_down {
+                Phase::Held { committed: false }
+            } else {
+                Phase::Idle
+            };
+            vec![Action::Ui(UiMsg::HideFade)]
+        } else {
+            vec![]
+        }
     }
 
     /// Rebuild binding tables when the config version changes; called by
@@ -216,11 +241,14 @@ impl Engine {
                         used: false,
                     };
                 }
-                // A down during an active hold is duplicate evidence only.
-                Phase::Meta { .. } => {}
+                // A down during an active hold or an open overlay is
+                // duplicate evidence only.
+                Phase::Held { .. } | Phase::Overlay { .. } => {}
             }
+            self.meta_down = true;
             return vec![Action::Swallow];
         }
+        self.meta_down = false;
         let mut actions = vec![Action::Swallow];
         match &self.phase {
             Phase::Idle => {}
@@ -239,29 +267,34 @@ impl Engine {
                     }));
                 }
             }
-            Phase::Meta { overlay, .. } => {
-                if !matches!(overlay, OverlayPhase::Hidden) {
-                    actions.push(Action::Ui(UiMsg::Hide));
-                }
-            }
+            Phase::Held { .. } => {}
+            // The switcher is sticky: releasing meta leaves it open. Esc, a
+            // selection, or the control keycode ends it.
+            Phase::Overlay { .. } => {}
         }
-        self.phase = Phase::Idle;
+        if !matches!(self.phase, Phase::Overlay { .. }) {
+            self.phase = Phase::Idle;
+        }
         actions
     }
 
-    /// Which layer answers key decisions, and whether the hold is committed.
-    fn hold_state(&self) -> (Layer, bool) {
+    /// Which layer answers key decisions right now.
+    fn layer(&self) -> Layer {
         match &self.phase {
-            Phase::Armed { .. } => (Layer::Hidden, false),
-            Phase::Meta { overlay, committed } => (
-                match overlay {
-                    OverlayPhase::Hidden => Layer::Hidden,
-                    OverlayPhase::Pinned => Layer::Pinned,
-                    OverlayPhase::Live(model) => Layer::Live(model.rows.clone()),
-                },
-                *committed,
-            ),
-            Phase::Idle => (Layer::Hidden, false),
+            Phase::Armed { .. } | Phase::Held { .. } | Phase::Idle => Layer::Hidden,
+            Phase::Overlay { overlay, .. } => match overlay {
+                OverlayPhase::Hidden => Layer::Hidden,
+                OverlayPhase::Pinned => Layer::Pinned,
+                OverlayPhase::Live(model) => Layer::Live(model.rows.clone()),
+            },
+        }
+    }
+
+    /// A committed hold is inert until F18 releases.
+    fn committed(&self) -> bool {
+        match &self.phase {
+            Phase::Held { committed } | Phase::Overlay { committed, .. } => *committed,
+            _ => false,
         }
     }
 
@@ -272,16 +305,15 @@ impl Engine {
             self.route[ix] = Route::Pass;
             return vec![Action::Pass];
         }
-        let (layer, committed) = self.hold_state();
-        if committed {
+        if self.committed() {
             self.route[ix] = Route::Swallow;
             return vec![Action::Swallow];
         }
-        match layer {
+        match self.layer() {
             Layer::Hidden => match self.tables.hidden.get(ix).copied().flatten() {
                 Some(Chord::Synth(sk)) => {
                     self.route[ix] = Route::Synth(sk.key);
-                    self.engage(OverlayPhase::Hidden);
+                    self.phase = Phase::Held { committed: false };
                     vec![
                         Action::Swallow,
                         Action::Synth(SynthKey {
@@ -291,12 +323,12 @@ impl Engine {
                         }),
                     ]
                 }
-                Some(Chord::CycleInput) if !ev.repeat => {
+                Some(Chord::CycleInput) => {
                     self.route[ix] = Route::Swallow;
-                    self.engage(OverlayPhase::Hidden);
+                    self.phase = Phase::Held { committed: false };
                     vec![Action::Swallow, Action::Job(Job::CycleInputSource)]
                 }
-                Some(Chord::OpenPinned) if !ev.repeat => {
+                Some(Chord::OpenPinned) => {
                     self.route[ix] = Route::Swallow;
                     self.enter_pinned()
                 }
@@ -316,7 +348,7 @@ impl Engine {
                         }
                     }
                 }
-                Some(Chord::ToggleMode) if !ev.repeat => {
+                Some(Chord::ToggleMode) => {
                     self.route[ix] = Route::Swallow;
                     self.enter_live()
                 }
@@ -335,7 +367,7 @@ impl Engine {
                     self.commit(ix, AppRef::Pid(pid))
                 } else {
                     match self.tables.pinned.get(ix).copied().flatten() {
-                        Some(Chord::ToggleMode) if !ev.repeat => {
+                        Some(Chord::ToggleMode) => {
                             self.route[ix] = Route::Swallow;
                             self.enter_pinned()
                         }
@@ -399,20 +431,23 @@ impl Engine {
         }
     }
 
-    fn engage(&mut self, overlay: OverlayPhase) {
-        self.phase = Phase::Meta {
-            overlay,
-            committed: false,
-        };
-    }
-
     fn cancel(&mut self, ix: usize) -> Vec<Action> {
         self.route[ix] = Route::Swallow;
-        self.phase = Phase::Meta {
-            overlay: OverlayPhase::Hidden,
-            committed: false,
+        let mut actions = self.cancel_state();
+        actions.insert(0, Action::Swallow);
+        actions
+    }
+
+    /// Where commit and cancel land depends on whether meta is still held:
+    /// a held F18 keeps the chord layer alive (inert when committed), a
+    /// released F18 returns the machine to transparent Idle.
+    fn cancel_state(&mut self) -> Vec<Action> {
+        self.phase = if self.meta_down {
+            Phase::Held { committed: false }
+        } else {
+            Phase::Idle
         };
-        vec![Action::Swallow, Action::Ui(UiMsg::HideFade)]
+        vec![Action::Ui(UiMsg::HideFade)]
     }
 
     /// Commit = hide instantly, switch on the main thread, and make the rest
@@ -420,9 +455,10 @@ impl Engine {
     /// just landed on.
     fn commit(&mut self, ix: usize, app: AppRef) -> Vec<Action> {
         self.route[ix] = Route::Swallow;
-        self.phase = Phase::Meta {
-            overlay: OverlayPhase::Hidden,
-            committed: true,
+        self.phase = if self.meta_down {
+            Phase::Held { committed: true }
+        } else {
+            Phase::Idle
         };
         vec![
             Action::Swallow,
@@ -449,7 +485,7 @@ impl Engine {
                 glyph: crate::key::glyph(app.key),
             })
             .collect();
-        self.phase = Phase::Meta {
+        self.phase = Phase::Overlay {
             overlay: OverlayPhase::Pinned,
             committed: false,
         };
@@ -493,7 +529,7 @@ impl Engine {
             });
         }
         let rows: Arc<[LiveRow]> = Arc::from(rows);
-        self.phase = Phase::Meta {
+        self.phase = Phase::Overlay {
             overlay: OverlayPhase::Live(Box::new(LiveModel { rows: rows.clone() })),
             committed: false,
         };

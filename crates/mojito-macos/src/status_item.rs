@@ -65,6 +65,9 @@ impl MenuTarget {
 
 struct StatusItemController {
     item: Retained<NSStatusItem>,
+    /// NSMenuItem.target is a weak reference; the menu items would be left
+    /// aiming at a deallocated target if we did not own it here.
+    target: Retained<MenuTarget>,
 }
 
 thread_local! {
@@ -100,7 +103,7 @@ pub fn install(tx: SyncSender<MenuAction>) -> Result<(), String> {
     item.setMenu(Some(&menu));
 
     STATUS_ITEM.with_borrow_mut(|slot| {
-        *slot = Some(StatusItemController { item });
+        *slot = Some(StatusItemController { item, target });
     });
     Ok(())
 }

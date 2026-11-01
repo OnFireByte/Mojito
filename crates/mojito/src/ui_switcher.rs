@@ -3,8 +3,6 @@
 //! `OverlayInput::Regions` plus a hit backdrop gives click-to-cancel without
 //! focus.
 
-use std::time::Duration;
-
 use rune::tok::type_;
 use rune::{
     Color, Cx, El, KeyPolicy, OverlayHandle, OverlayInput, OverlayOptions, OverlaySpec, Shadow,
@@ -168,9 +166,8 @@ pub fn view(s: &Switcher, cx: &mut Cx<Switcher>) -> El {
         .system_material(SystemMaterial::Glass)
         .child(frost);
 
-    // The backdrop: the whole window. A press here cancels the overlay the
-    // same way the engine's Esc does visually (fade), though the engine only
-    // learns of it when F18 releases — see the report on click-to-cancel.
+    // The backdrop: the whole window. A press here reaches the engine
+    // through the reserved control keycode and cancels like Esc does.
     col()
         .key("backdrop")
         .w_full()
@@ -263,11 +260,9 @@ fn monogram(r: &Row, accent: rune::Color) -> El {
         )
 }
 
-/// Click-to-cancel. The engine never learns of this — `UiMsg` flows one way —
-/// so the hold stays engaged until F18 releases; the engine's
-/// release-cancels-anyway invariant hides the overlay for good then.
-fn dismiss(s: &mut Switcher) {
-    if let Some(me) = &s.me {
-        me.fade_out(Duration::from_millis(120));
-    }
+/// Click-to-cancel. The backdrop posts the reserved control keycode; the tap
+/// turns it into an engine cancel, which hides the overlay through the same
+/// UiMsg path Esc uses. One source of truth for dismissal.
+fn dismiss(_: &mut Switcher) {
+    mojito_macos::synth::post_control();
 }

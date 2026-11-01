@@ -19,6 +19,7 @@ const RET: u16 = 0x24;
 const ESC: u16 = 0x35;
 const F18: u16 = 0x4F;
 const TRIGGER: u16 = 0x18; // '=' — not reserved, not in the label pool
+const LABEL_FIRST: u16 = 0x03; // f — the head of LABEL_PRIORITY
 
 const ARROW_LEFT: PhysicalKey = PhysicalKey(0x7B);
 const ARROW_DOWN: PhysicalKey = PhysicalKey(0x7D);
@@ -360,12 +361,104 @@ fn pin_trigger_commits_a_bundle_switch() {
 }
 
 #[test]
-fn release_hides_the_overlay() {
+fn release_leaves_the_overlay_open_and_bare_keys_still_select() {
     let mut engine = standard_rig();
     engine.on_event(key(F18, true, 0));
     engine.on_event(key(M, true, 10));
-    let release = engine.on_event(key(F18, false, 100));
-    assert_eq!(release, vec![Action::Swallow, Action::Ui(UiMsg::Hide)]);
+    // Releasing meta keeps the switcher: no Hide, no Esc.
+    assert_eq!(engine.on_event(key(F18, false, 100)), vec![Action::Swallow]);
+    // A bare m toggles to the live list, then a bare label key selects.
+    engine.on_event(key(M, true, 105));
+    let commit = engine.on_event(key(LABEL_FIRST, true, 110));
+    assert_eq!(commit[0], Action::Swallow);
+    assert_eq!(ui(&commit[1]), Some(&UiMsg::Hide));
+    assert!(matches!(&commit[2], Action::Job(Job::Switch(_))));
+    // The machine is transparent again for plain typing.
+    let plain = engine.on_event(key(LABEL_FIRST, false, 115));
+    assert!(plain.iter().all(|a| ui(a).is_none()));
+}
+
+#[test]
+fn sticky_overlay_esc_closes_and_unbound_keys_are_swallowed() {
+    let mut engine = standard_rig();
+    engine.on_event(key(F18, true, 0));
+    engine.on_event(key(M, true, 10));
+    engine.on_event(key(F18, false, 20));
+    // An unbound bare key does nothing but is still ours.
+    assert_eq!(engine.on_event(key(0x2C, true, 30)), vec![Action::Swallow]);
+    // Esc without meta closes the switcher with a fade.
+    let cancel = engine.on_event(key(ESC, true, 40));
+    assert_eq!(cancel, vec![Action::Swallow, Action::Ui(UiMsg::HideFade)]);
+    // Transparent again: a fresh key passes (the earlier '/' up stays
+    // swallowed because its down was ours).
+    assert_eq!(engine.on_event(key(Q, true, 50)), vec![Action::Pass]);
+}
+
+#[test]
+fn sticky_overlay_toggles_modes_without_meta() {
+    let mut engine = standard_rig();
+    engine.on_event(key(F18, true, 0));
+    engine.on_event(key(M, true, 10));
+    engine.on_event(key(F18, false, 20));
+    let toggle = engine.on_event(key(M, true, 30));
+    assert!(matches!(ui(&toggle[1]), Some(UiMsg::ShowLive { .. })));
+    let back = engine.on_event(key(M, true, 40));
+    assert!(matches!(ui(&back[1]), Some(UiMsg::ShowPinned { .. })));
+}
+
+#[test]
+fn commit_without_meta_returns_to_idle() {
+    let mut engine = standard_rig();
+    engine.on_event(key(F18, true, 0));
+    engine.on_event(key(M, true, 10));
+    engine.on_event(key(F18, false, 20));
+    let commit = engine.on_event(key(TRIGGER, true, 30));
+    assert_eq!(ui(&commit[1]), Some(&UiMsg::Hide));
+    // Plain typing passes immediately after a sticky commit.
+    let after = engine.on_event(key(0x2C, true, 40));
+    assert_eq!(after, vec![Action::Pass]);
+}
+
+#[test]
+fn commit_with_meta_held_stays_inert_until_release() {
+    let mut engine = standard_rig();
+    engine.on_event(key(F18, true, 0));
+    engine.on_event(key(M, true, 10));
+    let commit = engine.on_event(key(TRIGGER, true, 20));
+    assert_eq!(ui(&commit[1]), Some(&UiMsg::Hide));
+    // The rest of the hold is inert: no re-trigger, no typing.
+    assert_eq!(engine.on_event(key(TRIGGER, true, 30)), vec![Action::Swallow]);
+    assert_eq!(engine.on_event(key(F18, false, 40)), vec![Action::Swallow]);
+    // Idle again.
+    assert_eq!(engine.on_event(key(0x2C, true, 50)), vec![Action::Pass]);
+}
+
+#[test]
+fn cancel_overlay_control_only_reaches_an_open_overlay() {
+    let mut engine = standard_rig();
+    // Nothing open: the control path is a no-op.
+    assert_eq!(engine.cancel_overlay(), vec![]);
+    engine.on_event(key(F18, true, 0));
+    engine.on_event(key(M, true, 10));
+    // Meta still held: cancel lands back on the chord layer.
+    let cancel = engine.cancel_overlay();
+    assert_eq!(cancel, vec![Action::Ui(UiMsg::HideFade)]);
+    let arrow = engine.on_event(key(H, true, 20));
+    assert!(matches!(arrow.as_slice(), [Action::Swallow, Action::Synth(_)]));
+}
+
+#[test]
+fn cmd_chord_passes_during_sticky_overlay_too() {
+    let mut engine = standard_rig();
+    engine.on_event(key(F18, true, 0));
+    engine.on_event(key(M, true, 10));
+    engine.on_event(key(F18, false, 20));
+    let down = engine.on_event(flagged(TAB, true, 30, ModifierFlags::CMD));
+    assert_eq!(down, vec![Action::Pass]);
+    assert_eq!(
+        engine.on_event(flagged(TAB, false, 40, ModifierFlags::CMD)),
+        vec![Action::Pass]
+    );
 }
 
 #[test]

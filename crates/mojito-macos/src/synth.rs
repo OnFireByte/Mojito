@@ -44,6 +44,23 @@ pub fn post(key: &SynthKey) {
     }
 }
 
+/// The click-to-cancel control path. Posts an UNMARKED keyDown on the
+/// reserved control keycode so our own tap sees it (marked events are
+/// ignored there), turns it into a cancel, and swallows it before any app
+/// can. Callable from any thread; the tap thread is not required.
+pub fn post_control() {
+    // SAFETY: as `post`; this event deliberately carries no marker.
+    unsafe {
+        let event =
+            CGEventCreateKeyboardEvent(ptr::null_mut(), mojito_core::CONTROL.0, true);
+        if event.is_null() {
+            return;
+        }
+        CGEventPost(HID_EVENT_TAP, event);
+        CFRelease(event);
+    }
+}
+
 /// Marker check for the tap callback.
 ///
 /// # Safety

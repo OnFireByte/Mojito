@@ -12,6 +12,7 @@ pub struct CapsMap;
 /// Wire values are wider than 32 bits: hidutil's canonical encoding for a
 /// keyboard-page usage is `(0x07 << 32) | usage` (Caps Lock prints as
 /// 30064771129), so these are u64 on purpose.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct MappingEntry {
     pub src: u64,
     pub dst: u64,
@@ -41,11 +42,8 @@ impl CapsMap {
     /// LaunchAgent, delete the plist. A foreign entry remapping something
     /// else TO F18 survives.
     pub fn uninstall(&self) -> Result<(), String> {
-        let current = hidutil_get()?;
-        if !absent_mapping(&current) {
-            let remaining = without_entry(&current, CAPS_USAGE.0)?;
-            hidutil_set(&remaining)?;
-        }
+        let remaining = without_entry(&hidutil_get()?, CAPS_USAGE.0)?;
+        hidutil_set(&remaining)?;
         bootout_agent();
         delete_plist();
         Ok(())
@@ -101,23 +99,11 @@ impl CapsMap {
     }
 }
 
-/// True when hidutil reports no UserKeyMapping at all: a fresh machine
-/// prints the property's `(null)` placeholder, which is an empty slate,
-/// not an error.
-fn absent_mapping(text: &str) -> bool {
-    let trimmed = text.trim();
-    trimmed.is_empty() || !trimmed.contains('[')
-}
-
-/// The merged UserKeyMapping as of now. A genuinely absent mapping is an
-/// empty slate; a mapping that fails to parse stays an error so foreign
+/// The merged UserKeyMapping as of now. An absent mapping merges into our
+/// pair alone; a mapping that fails to parse stays an error so foreign
 /// entries are never clobbered.
 fn merged_or_current() -> Result<String, String> {
-    let current = hidutil_get()?;
-    if absent_mapping(&current) {
-        return Ok(our_pair_alone());
-    }
-    merge_mapping(&current, our_pair())
+    merge_mapping(&hidutil_get()?, our_pair())
 }
 
 fn our_pair_alone() -> String {
@@ -159,108 +145,98 @@ fn hidutil_set(mapping: &str) -> Result<(), String> {
     Ok(())
 }
 
-/// Extract the UserKeyMapping JSON array from hidutil output. The output is
-/// either bare JSON or prefixed with `("UserKeyMapping") = `, so scan for the
-/// array bounds instead of parsing the whole document.
-fn extract_array(text: &str) -> Result<String, String> {
-    let start = text
-        .find('[')
-        .ok_or_else(|| "no UserKeyMapping array in hidutil output".to_string())?;
-    let end = text
-        .rfind(']')
-        .ok_or_else(|| "unterminated UserKeyMapping array".to_string())?;
-    if end < start {
-        return Err("malformed hidutil output".into());
+/// Parse the UserKeyMapping entries out of `hidutil property --get` output.
+/// On current macOS the property prints as an old-style plist fragment,
+/// `( { HIDKeyboardModifierMappingDst = 30064771181; ... } )`; some sources
+/// show JSON with the same keys. An absent mapping prints `(null)` or an
+/// empty string and is an empty slate, not an error. Anything else that
+/// yields no readable entries stays an error so foreign remaps are never
+/// clobbered. Pure; unit-tested against the format observed on-device.
+fn entries_from(text: &str) -> Result<Vec<MappingEntry>, String> {
+    let trimmed = text.trim();
+    if trimmed.is_empty() || trimmed == "(null)" {
+        return Ok(Vec::new());
     }
-    Ok(text[start..=end].to_string())
-}
-
-/// Numeric JSON value reader that also accepts hex strings, because hidutil
-/// documentation examples use both forms.
-fn json_number(value: &serde_json::Value) -> Option<u64> {
-    match value {
-        serde_json::Value::Number(number) => number
-            .as_u64()
-            .or_else(|| number.as_i64().map(|v| v as u64)),
-        serde_json::Value::String(text) => {
-            let trimmed = text.trim();
-            if let Some(hex) = trimmed.strip_prefix("0x") {
-                u64::from_str_radix(hex, 16).ok()
-            } else {
-                trimmed.parse().ok()
-            }
+    let mut entries = Vec::new();
+    let mut rest = trimmed;
+    while let Some(start) = rest.find('{') {
+        let Some(end) = rest[start..].find('}') else {
+            return Err("unterminated UserKeyMapping entry".into());
+        };
+        let block = &rest[start + 1..start + end];
+        rest = &rest[start + end + 1..];
+        if let (Some(src), Some(dst)) = (block_value(block, SRC_KEY), block_value(block, DST_KEY)) {
+            entries.push(MappingEntry { src, dst });
         }
-        _ => None,
+    }
+    if entries.is_empty() {
+        if trimmed.contains('{') {
+            return Err("could not read any UserKeyMapping entry from hidutil output".into());
+        }
+        // `( )`, `[]`, `(null)`, and empty all mean no custom mapping.
+        return Ok(Vec::new());
+    }
+    Ok(entries)
+}
+
+/// The numeric value assigned to `key` inside one `{...}` entry, decimal or
+/// 0x-hex. The scan is anchored on the key, so entry ordering does not
+/// matter and both `=` (plist) and `:` (JSON) assignments are accepted.
+fn block_value(block: &str, key: &str) -> Option<u64> {
+    let tail = &block[block.find(key)? + key.len()..];
+    let assign = tail.find(['=', ':'])?;
+    if tail[..assign].contains([';', ',']) {
+        return None;
+    }
+    // Values are separated from '=' by whitespace in the plist form, so
+    // trim before the split or the first item is the empty prefix.
+    let value = tail[assign + 1..].trim_start();
+    let value = value
+        .split(|c: char| c == ';' || c == ',' || c == '}' || c.is_whitespace())
+        .next()?;
+    if let Some(hex) = value.strip_prefix("0x").or_else(|| value.strip_prefix("0X")) {
+        u64::from_str_radix(hex, 16).ok()
+    } else {
+        value.parse().ok()
     }
 }
 
-fn entry_src(entry: &serde_json::Map<String, serde_json::Value>) -> Option<u64> {
-    json_number(entry.get(SRC_KEY)?)
-}
-
-fn entry_dst(entry: &serde_json::Map<String, serde_json::Value>) -> Option<u64> {
-    json_number(entry.get(DST_KEY)?)
-}
-
-fn entries_from(text: &str) -> Result<Vec<serde_json::Map<String, serde_json::Value>>, String> {
-    let array = extract_array(text)?;
-    let parsed: Vec<serde_json::Value> = serde_json::from_str(&array)
-        .map_err(|error| format!("malformed UserKeyMapping: {error}"))?;
-    Ok(parsed
-        .into_iter()
-        .filter_map(|value| match value {
-            serde_json::Value::Object(map) => Some(map),
-            _ => None,
-        })
-        .collect())
-}
-
-fn serialize(entries: &[serde_json::Map<String, serde_json::Value>]) -> String {
+/// Our entries plus the parsed foreign entries as hidutil's `--set` input,
+/// which is JSON on every version we support. Pure; unit-tested.
+fn serialize(entries: &[MappingEntry]) -> String {
     let items: Vec<String> = entries
         .iter()
-        .map(|entry| {
-            let pairs: Vec<String> = entry
-                .iter()
-                .map(|(key, value)| format!("{key:?}:{value}"))
-                .collect();
-            format!("{{{}}}", pairs.join(","))
-        })
+        .map(|entry| format!("{{{}}}", entry_json((entry.src, entry.dst))))
         .collect();
     format!("[{}]", items.join(","))
 }
 
-/// One of our entries as a JSON object, dropping any extra keys.
+/// Our caps->F18 entry as a JSON object.
 fn entry_json(pair: (u64, u64)) -> String {
     format!(r#""{SRC_KEY}":{},"{DST_KEY}":{}"#, pair.0, pair.1)
 }
 
-/// Merge our caps->F18 entry into the parsed UserKeyMapping: our previous
-/// entries (matched on Src) are replaced, foreign entries survive untouched,
-/// and the result serializes back to hidutil's array form. Pure; unit-tested.
+/// Merge our caps->F18 entry into the parsed UserKeyMapping: any previous
+/// entry for the same source is replaced, foreign entries survive untouched.
+/// Pure; unit-tested.
 fn merge_mapping(existing: &str, ours: (u64, u64)) -> Result<String, String> {
     let mut entries = entries_from(existing)?;
-    entries.retain(|entry| entry_src(entry) != Some(ours.0));
-    let mut merged = serde_json::Map::new();
-    merged.insert(SRC_KEY.into(), serde_json::Value::from(ours.0));
-    merged.insert(DST_KEY.into(), serde_json::Value::from(ours.1));
-    entries.push(merged);
+    entries.retain(|entry| entry.src != ours.0);
+    entries.push(MappingEntry { src: ours.0, dst: ours.1 });
     Ok(serialize(&entries))
 }
 
 /// Every entry except the one whose Src matches `src`. Pure; unit-tested.
 fn without_entry(existing: &str, src: u64) -> Result<String, String> {
     let mut entries = entries_from(existing)?;
-    entries.retain(|entry| entry_src(entry) != Some(src));
+    entries.retain(|entry| entry.src != src);
     Ok(serialize(&entries))
 }
 
 /// True when some entry maps exactly `src -> dst`. Pure; unit-tested.
 fn contains_pair(existing: &str, ours: (u64, u64)) -> bool {
-    entries_from(existing).is_ok_and(|entries| {
-        entries
-            .iter()
-            .any(|entry| entry_src(entry) == Some(ours.0) && entry_dst(entry) == Some(ours.1))
-    })
+    entries_from(existing)
+        .is_ok_and(|entries| entries.iter().any(|entry| entry.src == ours.0 && entry.dst == ours.1))
 }
 
 /// The current user id, for `launchctl bootstrap gui/<uid>`.
@@ -328,16 +304,42 @@ mod tests {
     // The real TN2450 encoding: (usage_page << 32) | usage.
     const OURS: (u64, u64) = (0x7_0000_0039, 0x7_0000_006D);
 
-    /// The on-device discovery that forced this fix: a fresh machine prints
-    /// `(null)`, and treating that as an error made the first install a
-    /// silent no-op.
+    /// The on-device discovery that forced these tests: a fresh machine
+    /// prints `(null)`, and the first parser treated that as an error, so
+    /// the first install was a silent no-op.
     #[test]
-    fn absent_hidutil_output_is_an_empty_slate() {
-        assert!(absent_mapping("(null)\n"));
-        assert!(absent_mapping("  "));
-        assert!(!absent_mapping(
-            "(\"UserKeyMapping\") = [{\"HIDKeyboardModifierMappingSrc\":30064771129}]"
-        ));
+    fn absent_output_is_an_empty_slate() {
+        assert_eq!(entries_from("(null)\n"), Ok(vec![]));
+        assert_eq!(entries_from("  "), Ok(vec![]));
+        assert_eq!(entries_from("( \n)"), Ok(vec![]));
+        assert_eq!(entries_from("[]"), Ok(vec![]));
+    }
+
+    /// The exact output captured on this machine (macOS 15, old-style plist
+    /// fragment with the destination listed first).
+    #[test]
+    fn parses_the_on_device_plist_format() {
+        let text = "(\n        {\n        HIDKeyboardModifierMappingDst = 30064771181;\n        HIDKeyboardModifierMappingSrc = 30064771129;\n    }\n)";
+        let entries = entries_from(text).unwrap();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].src, 30064771129);
+        assert_eq!(entries[0].dst, 30064771181);
+        assert!(contains_pair(text, OURS));
+    }
+
+    #[test]
+    fn parses_multi_entry_plist_with_hex_values() {
+        let text = "( { HIDKeyboardModifierMappingDst = 0x70000006D; HIDKeyboardModifierMappingSrc = 0x70000002A; }, { HIDKeyboardModifierMappingDst = 5; HIDKeyboardModifierMappingSrc = 6; } )";
+        let entries = entries_from(text).unwrap();
+        assert_eq!(entries.len(), 2);
+        assert_eq!(entries[0], MappingEntry { src: 0x70000002A, dst: 0x70000006D });
+        assert_eq!(entries[1], MappingEntry { src: 6, dst: 5 });
+    }
+
+    #[test]
+    fn parses_the_json_form_with_colon_assignment() {
+        let text = r#"[{"HIDKeyboardModifierMappingSrc":30064771129,"HIDKeyboardModifierMappingDst":30064771181}]"#;
+        assert!(contains_pair(text, OURS));
     }
 
     #[test]
@@ -345,9 +347,7 @@ mod tests {
         let merged = merge_mapping("[]", OURS).unwrap();
         let entries = entries_from(&merged).unwrap();
         assert_eq!(entries.len(), 1);
-        assert_eq!(entry_src(&entries[0]), Some(OURS.0));
-        assert_eq!(entry_dst(&entries[0]), Some(OURS.1));
-        assert!(contains_pair(&merged, OURS));
+        assert_eq!(entries[0], MappingEntry { src: OURS.0, dst: OURS.1 });
     }
 
     #[test]
@@ -375,36 +375,29 @@ mod tests {
     }
 
     #[test]
-    fn merge_tolerates_the_hidutil_output_prefix_and_decimal_values() {
-        let existing = "(\"UserKeyMapping\") = [\n  {\n    \"HIDKeyboardModifierMappingSrc\" : 30064771114,\n    \"HIDKeyboardModifierMappingDst\" : 30064771113\n  }\n]";
+    fn merge_replaces_a_foreign_caps_lock_remap() {
+        // A pre-existing remap OF caps lock is replaced by ours; that is the
+        // product's premise. The plist form is what this machine prints.
+        let existing =
+            "( {\n    HIDKeyboardModifierMappingDst = 30064771113;\n    HIDKeyboardModifierMappingSrc = 30064771129;\n} )";
         let merged = merge_mapping(existing, OURS).unwrap();
-        assert!(contains_pair(&merged, (30064771114, 30064771113)));
         assert!(contains_pair(&merged, OURS));
-    }
-
-    #[test]
-    fn merge_accepts_hex_string_values() {
-        let existing = r#"[{"HIDKeyboardModifierMappingSrc":"0x700000042","HIDKeyboardModifierMappingDst":"0x700000029"}]"#;
-        let merged = merge_mapping(existing, OURS).unwrap();
-        assert!(contains_pair(&merged, (0x700000042, 0x700000029)));
+        assert!(!contains_pair(&merged, (OURS.0, 30064771113)));
     }
 
     #[test]
     fn merge_rejects_malformed_input() {
-        assert!(merge_mapping("not json at all", OURS).is_err());
-        assert!(merge_mapping("[{\"HIDKeyboardModifierMappingSrc\":}]", OURS).is_err());
-        assert!(merge_mapping("[", OURS).is_err());
+        assert!(merge_mapping("not a mapping at all {", OURS).is_err());
+        assert!(merge_mapping("{ HIDKeyboardModifierMappingSrc = }", OURS).is_err());
+        assert!(merge_mapping("{ unterminated", OURS).is_err());
     }
 
     #[test]
     fn without_entry_removes_only_the_matching_src() {
-        let existing = format!(
-            "[{{\"{SRC_KEY}\":{},\"{DST_KEY}\":{}}},{{\"{SRC_KEY}\":42,\"{DST_KEY}\":{}}}]",
-            OURS.0, OURS.1, OURS.1
-        );
-        let remaining = without_entry(&existing, OURS.0).unwrap();
+        let existing = "( { HIDKeyboardModifierMappingDst = 30064771181; HIDKeyboardModifierMappingSrc = 30064771129; }, { HIDKeyboardModifierMappingDst = 9; HIDKeyboardModifierMappingSrc = 42; } )";
+        let remaining = without_entry(existing, OURS.0).unwrap();
         assert!(!contains_pair(&remaining, OURS));
-        assert!(contains_pair(&remaining, (42, OURS.1)));
+        assert!(contains_pair(&remaining, (42, 9)));
     }
 
     #[test]
@@ -413,16 +406,17 @@ mod tests {
         assert!(contains_pair(&existing, OURS));
         assert!(!contains_pair(&existing, (OURS.0, 1)));
         assert!(!contains_pair(&existing, (1, OURS.1)));
-        assert!(!contains_pair("[]", OURS));
+        assert!(!contains_pair("( )", OURS));
     }
 
     #[test]
-    fn entry_json_round_trips_through_the_parser() {
-        let text = format!("[{{{}}}]", entry_json(OURS));
-        let entries = entries_from(&text).unwrap();
-        assert_eq!(entries.len(), 1);
-        assert_eq!(entry_src(&entries[0]), Some(OURS.0));
-        assert_eq!(entry_dst(&entries[0]), Some(OURS.1));
+    fn serialize_round_trips_through_the_parser() {
+        let entries = vec![
+            MappingEntry { src: OURS.0, dst: OURS.1 },
+            MappingEntry { src: 42, dst: 43 },
+        ];
+        let parsed = entries_from(&serialize(&entries)).unwrap();
+        assert_eq!(parsed, entries);
     }
 
     #[test]

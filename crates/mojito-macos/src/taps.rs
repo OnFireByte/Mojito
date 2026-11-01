@@ -254,6 +254,22 @@ unsafe extern "C" fn on_key_event(
     if unsafe { is_marked(event) } {
         return event;
     }
+    // The UI's click-to-cancel control path: an unmarked keyDown on the
+    // reserved control keycode. Cancel through the engine, then swallow the
+    // event so no app ever sees it.
+    if event_type == EVENT_KEY_DOWN
+        && unsafe { CGEventGetIntegerValueField(event, KEYBOARD_EVENT_KEYCODE) }
+            == mojito_core::CONTROL.0 as i64
+    {
+        TAP.with_borrow_mut(|state| {
+            if let Some(engine) = &mut state.engine {
+                for action in engine.cancel_overlay() {
+                    apply(state, action);
+                }
+            }
+        });
+        return ptr::null_mut();
+    }
     let pass = TAP.with_borrow_mut(|state| {
         let Some(engine) = &mut state.engine else {
             return true;
