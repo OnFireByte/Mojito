@@ -128,6 +128,54 @@ fn first_window(app: &CfObject) -> Option<AxWindow> {
     }
 }
 
+/// Debug trace of one full switch against a bundle id; prints every step so
+/// a failing ladder names the failing step. Runs without the GUI.
+pub fn debug_switch(bundle: &str) {
+    let app = mojito_core::AppRef::Bundle(bundle.to_string());
+    let pid = match resolve(&app) {
+        Some(pid) => {
+            println!("resolve: pid {pid}");
+            pid
+        }
+        None => {
+            println!("resolve: FAILED for {bundle}");
+            return;
+        }
+    };
+    let running = objc2_app_kit::NSRunningApplication::runningApplicationWithProcessIdentifier(pid);
+    if let Some(running) = running {
+        println!("hidden: {}", running.isHidden());
+        let activated = running.activateWithOptions(objc2_app_kit::NSApplicationActivationOptions::empty());
+        println!("activate: {activated}");
+    }
+    match pick_window_verbose(pid) {
+        Ok((via, window)) => {
+            println!("pick_window: via {via}");
+            match raise(&window) {
+                Ok(()) => println!("raise: ok"),
+                Err(message) => println!("raise: {message}"),
+            }
+        }
+        Err(message) => println!("pick_window: {message}"),
+    }
+}
+
+/// The pick ladder with the winning attribute named.
+fn pick_window_verbose(pid: i32) -> Result<(String, AxWindow), String> {
+    let app = bounded_element(unsafe { AXUIElementCreateApplication(pid) })
+        .ok_or("AXUIElementCreateApplication returned null")?;
+    if let Some(window) = copy_element(&app, KAX_FOCUSED_WINDOW) {
+        return Ok(("kAXFocusedWindow".into(), window));
+    }
+    if let Some(window) = copy_element(&app, KAX_MAIN_WINDOW) {
+        return Ok(("kAXMainWindow".into(), window));
+    }
+    if let Some(window) = first_window(&app) {
+        return Ok(("kAXWindows[0]".into(), window));
+    }
+    Err("no focused, main, or listed window".into())
+}
+
 /// Clear kAXMinimized before raising a minimized target. Best-effort.
 fn unminimize(pid: i32) {
     let Some(app) = bounded_element(unsafe { AXUIElementCreateApplication(pid) }) else {

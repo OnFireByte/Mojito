@@ -66,7 +66,9 @@ impl MenuTarget {
 struct StatusItemController {
     item: Retained<NSStatusItem>,
     /// NSMenuItem.target is a weak reference; the menu items would be left
-    /// aiming at a deallocated target if we did not own it here.
+    /// aiming at a deallocated target if we did not own it here. Never
+    /// read: holding it is the point.
+    #[allow(dead_code)]
     target: Retained<MenuTarget>,
 }
 

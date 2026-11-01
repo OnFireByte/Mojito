@@ -44,6 +44,20 @@ pub fn post(key: &SynthKey) {
     }
 }
 
+/// Post one key event without the marker. Debug only: the running tap will
+/// interpret it like a physical key.
+pub fn post_raw(code: u16, down: bool) {
+    // SAFETY: as `post`; unmarked so the tap processes it as raw input.
+    unsafe {
+        let event = CGEventCreateKeyboardEvent(ptr::null_mut(), code, down);
+        if event.is_null() {
+            return;
+        }
+        CGEventPost(HID_EVENT_TAP, event);
+        CFRelease(event);
+    }
+}
+
 /// The click-to-cancel control path. Posts an UNMARKED keyDown on the
 /// reserved control keycode so our own tap sees it (marked events are
 /// ignored there), turns it into a cancel, and swallows it before any app

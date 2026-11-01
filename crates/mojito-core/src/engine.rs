@@ -76,7 +76,6 @@ enum Phase {
 
 #[derive(Debug)]
 enum OverlayPhase {
-    Hidden,
     Pinned,
     Live(Box<LiveModel>),
 }
@@ -283,7 +282,6 @@ impl Engine {
         match &self.phase {
             Phase::Armed { .. } | Phase::Held { .. } | Phase::Idle => Layer::Hidden,
             Phase::Overlay { overlay, .. } => match overlay {
-                OverlayPhase::Hidden => Layer::Hidden,
                 OverlayPhase::Pinned => Layer::Pinned,
                 OverlayPhase::Live(model) => Layer::Live(model.rows.clone()),
             },

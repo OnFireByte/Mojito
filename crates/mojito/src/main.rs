@@ -33,6 +33,38 @@ const UI_CHANNEL_BOUND: usize = 64;
 const JOB_CHANNEL_BOUND: usize = 256;
 
 fn main() {
+    // Debug verbs run headless in this same bundle so they carry the app's
+    // TCC grants; everything else starts the GUI.
+    let mut args = std::env::args().skip(1);
+    match args.next().as_deref() {
+        Some("switch") => {
+            if let Some(bundle) = args.next() {
+                mojito_macos::switch::debug_switch(&bundle);
+                return;
+            }
+            eprintln!("usage: mojito switch <bundle-id>");
+            return;
+        }
+        Some("key") => {
+            let (code, down) = match (args.next(), args.next()) {
+                (Some(code), Some(dir)) => (
+                    u16::from_str_radix(code.trim_start_matches("0x"), 16).unwrap_or(0),
+                    dir == "down",
+                ),
+                _ => {
+                    eprintln!("usage: mojito key <hex-code> <down|up>");
+                    return;
+                }
+            };
+            mojito_macos::synth::post_raw(code, down);
+            return;
+        }
+        Some(other) => {
+            eprintln!("unknown verb {other}; verbs: switch, key");
+            return;
+        }
+        None => {}
+    }
     warn_unbundled();
     rune::prewarm_gpu();
 
@@ -198,7 +230,10 @@ fn hub_poll(s: &mut Hub, _: f64, _: &mut Tx) -> bool {
                 reveal(overlay, s, ui_switcher::Mode::Live, rows);
             }
             UiMsg::Hide => overlay.hide(),
-            UiMsg::HideFade => overlay.fade_out(Duration::from_millis(120)),
+            UiMsg::HideFade => {
+                eprintln!("mojito: HideFade received");
+                overlay.fade_out(Duration::from_millis(120))
+            }
         }
     }
     let (Some(store), Some(index)) = (s.store.as_ref(), s.index.as_ref()) else {

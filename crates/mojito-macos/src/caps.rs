@@ -106,10 +106,6 @@ fn merged_or_current() -> Result<String, String> {
     merge_mapping(&hidutil_get()?, our_pair())
 }
 
-fn our_pair_alone() -> String {
-    format!("[{{{}}}]", entry_json(our_pair()))
-}
-
 fn our_pair() -> (u64, u64) {
     (CAPS_USAGE.0, F18_USAGE.0)
 }

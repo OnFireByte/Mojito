@@ -669,6 +669,7 @@ fn settings_save_rebuilds_tables_on_the_next_gesture() {
             bundle_id: "com.apple.Terminal".into(),
             key: PhysicalKey(0x07),
         }],
+        hint_layout: None,
         version: 1,
         ..Default::default()
     }));

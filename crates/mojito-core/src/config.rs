@@ -10,6 +10,9 @@ pub struct Config {
     pub tap_max_ms: u16,
     pub capture_enabled: bool,
     pub label_memory: crate::labels::LabelMemory,
+    /// Which installed layout renders hint glyphs (InputSourceID); None
+    /// follows the current input source.
+    pub hint_layout: Option<String>,
     /// Bumped on every accepted save so the engine can rebuild tables lazily.
     pub version: u64,
 }
@@ -21,6 +24,7 @@ impl Default for Config {
             tap_max_ms: 250,
             capture_enabled: true,
             label_memory: crate::labels::LabelMemory::default(),
+            hint_layout: None,
             version: 0,
         }
     }
@@ -73,6 +77,15 @@ pub fn parse(bytes: &[u8]) -> (Config, Vec<Warning>) {
         match v.as_bool() {
             Some(b) => config.capture_enabled = b,
             None => warnings.push(Warning("capture_enabled: invalid value; using true".into())),
+        }
+    }
+    if let Some(v) = obj.get("hint_layout") {
+        match v {
+            serde_json::Value::Null => {}
+            serde_json::Value::String(id) => config.hint_layout = Some(id.clone()),
+            _ => warnings.push(Warning(
+                "hint_layout: invalid value; following the current layout".into(),
+            )),
         }
     }
     if let Some(v) = obj.get("version") {
@@ -324,6 +337,7 @@ mod tests {
             tap_max_ms: 180,
             capture_enabled: false,
             label_memory: LabelMemory([("com.a".into(), PhysicalKey(3))].into_iter().collect()),
+            hint_layout: None,
             version: 12,
         };
         let bytes = serde_json::to_string_pretty(&original).unwrap();
