@@ -7,9 +7,23 @@ edition.workspace = true
 mojito-core = { path = "../mojito-core" }
 arc-swap.workspace = true
 objc2.workspace = true
-objc2-app-kit.workspace = true
 objc2-core-foundation.workspace = true
 objc2-foundation.workspace = true
 objc2-service-management.workspace = true
 block2.workspace = true
 core-graphics-types.workspace = true
+serde_json.workspace = true
+
+# AppKit types the backend touches directly: status item, workspace/index,
+# running applications. Features are additive to the workspace defaults.
+objc2-app-kit = { workspace = true, features = [
+    "NSApplication",
+    "NSImage",
+    "NSMenu",
+    "NSMenuItem",
+    "NSRunningApplication",
+    "NSStatusBar",
+    "NSStatusBarButton",
+    "NSStatusItem",
+    "NSWorkspace",
+] }
