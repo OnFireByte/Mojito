@@ -34,11 +34,12 @@ pub fn settings_spec() -> AppSpec<SettingsState> {
 
 /// Fixed size, so tiling window managers float the settings window instead of
 /// tiling it into uselessness.
-pub fn settings_window_options() -> WindowOptions {
+pub fn settings_window_options() -> ConfiguredWindowOptions {
     WindowOptions {
         resizable: false,
         min_size: Some(ui_settings::SIZE),
         max_size: Some(ui_settings::SIZE),
         ..Default::default()
     }
+    .into()
 }

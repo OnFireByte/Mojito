@@ -1080,6 +1080,7 @@ dependencies = [
  "objc2 0.6.5",
  "objc2-foundation 0.3.2",
  "objc2-service-management",
+ "procwatch",
  "rune",
  "rune-kit",
  "rune-theme-opencode",
@@ -1927,6 +1928,14 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "985e7ec9bb745e6ce6535b544d84d6cd6f7ad8bd711c398938ae983b91a766d9"
 dependencies = [
  "unicode-ident",
+]
+
+[[package]]
+name = "procwatch"
+version = "0.1.0"
+dependencies = [
+ "libc",
+ "serde_json",
 ]
 
 [[package]]
@@ -3524,10 +3533,6 @@ checksum = "27bc9d5b815bc103f142aa054f561d9187d191692ec7c2d1e2b4737f8dbd7296"
 dependencies = [
  "zune-core",
 ]
-
-[[patch.unused]]
-name = "procwatch"
-version = "0.1.0"
 
 [[patch.unused]]
 name = "rune-mermaid"

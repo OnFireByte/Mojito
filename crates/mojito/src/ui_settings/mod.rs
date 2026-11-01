@@ -185,6 +185,13 @@ pub fn closed(s: &mut SettingsState, _: &mut Tx) {
     s.capturing = None;
     s.hint_menu_open = false;
     s.live_refresh = false;
+    let usage = procwatch::usage();
+    let mb = |bytes: Option<u64>| bytes.map_or_else(|| "?".into(), |b| format!("{:.1}MB", b as f64 / 1e6));
+    eprintln!(
+        "mojito: settings closed; footprint {} peak {}",
+        mb(usage.footprint),
+        mb(usage.footprint_peak)
+    ); // TEMP diagnosis
 }
 
 /// Settings poll: delivers the catalog scan, clears the save toast, and
