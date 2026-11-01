@@ -1,0 +1,15 @@
+[package]
+name = "mojito-macos"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+mojito-core = { path = "../mojito-core" }
+arc-swap.workspace = true
+objc2.workspace = true
+objc2-app-kit.workspace = true
+objc2-core-foundation.workspace = true
+objc2-foundation.workspace = true
+objc2-service-management.workspace = true
+block2.workspace = true
+core-graphics-types.workspace = true
