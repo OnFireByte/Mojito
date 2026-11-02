@@ -26,7 +26,11 @@ const LAYER_NORMAL: i64 = 0;
 unsafe extern "C" {
     fn CGWindowListCopyWindowInfo(option: u32, window_id: u32) -> *const c_void;
     fn CFRelease(value: *const c_void);
+    fn CGSMainConnectionID() -> i32;
+    fn CGSCopySpacesForWindows(connection: i32, mask: i32, windows: &CFArray) -> *const c_void;
 }
+
+const ALL_SPACE_KINDS: i32 = 0b111;
 
 pub struct AppIndexHandle {
     current: Arc<ArcSwap<AppIndex>>,
@@ -236,6 +240,7 @@ const ALL_SPACES: u32 = 0 | (1 << 4);
 /// count (their app is switchable); windows on other Spaces count too.
 fn window_counts() -> HashMap<i32, u8> {
     let mut counts = HashMap::new();
+    let connection = unsafe { CGSMainConnectionID() };
     // SAFETY: CoreGraphics returns a +1 CFArray of CFDictionary window info.
     let list = unsafe { CGWindowListCopyWindowInfo(ALL_SPACES, 0) };
     if list.is_null() {
@@ -246,15 +251,21 @@ fn window_counts() -> HashMap<i32, u8> {
     for index in 0..array.len() as isize {
         // SAFETY: the index is in bounds and the array is not mutated.
         let dict = unsafe { array.get_unchecked(index) };
-        let Some(layer) = dict_number(dict, "kCGWindowLayer") else {
+        if dict_number(dict, "kCGWindowLayer") != Some(LAYER_NORMAL) {
             continue;
-        };
-        if layer != LAYER_NORMAL {
+        }
+        if dict_cf_number(dict, "kCGWindowAlpha").and_then(CFNumber::as_f64) == Some(0.0) {
             continue;
         }
         let Some(pid) = dict_number(dict, "kCGWindowOwnerPID") else {
             continue;
         };
+        let Some(id) = dict_number(dict, "kCGWindowNumber") else {
+            continue;
+        };
+        if !is_on_a_space(connection, id) {
+            continue;
+        }
         let count = counts.entry(pid as i32).or_insert(0_u8);
         *count = (*count).saturating_add(1);
     }
@@ -263,15 +274,31 @@ fn window_counts() -> HashMap<i32, u8> {
     counts
 }
 
+fn is_on_a_space(connection: i32, window_id: i64) -> bool {
+    let windows = CFArray::from_retained_objects(&[CFNumber::new_i64(window_id)]);
+    let spaces =
+        unsafe { CGSCopySpacesForWindows(connection, ALL_SPACE_KINDS, windows.as_opaque()) };
+    if spaces.is_null() {
+        return false;
+    }
+    let count = unsafe { &*(spaces as *const CFArray) }.len();
+    unsafe { CFRelease(spaces) };
+    count > 0
+}
+
 fn dict_number(dict: &CFDictionary, key: &str) -> Option<i64> {
+    dict_cf_number(dict, key).and_then(CFNumber::as_i64)
+}
+
+fn dict_cf_number<'a>(dict: &'a CFDictionary, key: &str) -> Option<&'a CFNumber> {
     // SAFETY: the dictionary is alive and its values are CF objects.
     let key = CFString::from_str(key);
     let value = unsafe { dict.value(&*key as *const CFString as *const c_void) };
     if value.is_null() {
         return None;
     }
-    // SAFETY: kCGWindowLayer/kCGWindowOwnerPID values are CFNumbers.
-    unsafe { &*(value as *const CFNumber) }.as_i64()
+    // SAFETY: the window info values read here are CFNumbers.
+    Some(unsafe { &*(value as *const CFNumber) })
 }
 
 /// Debug: every event tap installed on the system, with its pid, tap point,

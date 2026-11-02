@@ -15,7 +15,8 @@ pub const MARGIN: f32 = 40.0;
 const CARD_W: f32 = 380.0;
 const CARD_RADIUS: f32 = 22.0;
 const HEADER_H: f32 = 34.0;
-const ROW_H: f32 = 44.0;
+const ROW_H: f32 = 36.0;
+const ICON: f32 = 24.0;
 const PAD: f32 = 12.0;
 const MAX_ROWS: usize = 12;
 
@@ -117,7 +118,7 @@ pub fn view(s: &Switcher, cx: &mut Cx<Switcher>) -> El {
         .fill(t.frost)
         .border(1.0, ink.alpha(0.08))
         .on_press(|_: &mut Switcher| {})
-        .child(header(s, t, accent));
+        .child(header(s, t));
     if s.rows.is_empty() {
         frost = frost.child(
             row().key("empty").h(ROW_H).px(10.0).center_y().child(
@@ -180,7 +181,7 @@ pub fn view(s: &Switcher, cx: &mut Cx<Switcher>) -> El {
         .child(card)
 }
 
-fn header(s: &Switcher, t: SwitchTheme, accent: rune::Color) -> El {
+fn header(s: &Switcher, t: SwitchTheme) -> El {
     let title = match s.mode {
         Some(Mode::Pinned) => "Pinned apps",
         Some(Mode::Live) => "Open apps",
@@ -193,7 +194,17 @@ fn header(s: &Switcher, t: SwitchTheme, accent: rune::Color) -> El {
         .center_y()
         .justify_between()
         .child(text(title).font(type_::SECTION).color(t.text_secondary))
-        .child(el().key("dot").size(8.0, 8.0).radius(4.0).fill(accent))
+        .child(
+            el().key("esc")
+                .px(5.0)
+                .radius(5.0)
+                .border(1.0, t.text_secondary.alpha(0.35))
+                .child(
+                    text("esc")
+                        .font(type_::MONO_CAPTION)
+                        .color(t.text_secondary),
+                ),
+        )
 }
 
 fn row_view(i: usize, r: &Row, t: SwitchTheme, accent: rune::Color) -> El {
@@ -219,26 +230,30 @@ fn row_view(i: usize, r: &Row, t: SwitchTheme, accent: rune::Color) -> El {
                     .truncate(),
             ),
         )
-        .children(r.windows.map(|n| {
-            text(n.to_string())
-                .key("windows")
-                .font(type_::MONO_CAPTION)
-                .color(t.text_secondary)
+        .children(r.windows.filter(|n| *n > 1).map(|n| {
+            el().key("windows").px(6.0).radius(9.0).fill(t.track).child(
+                text(format!("×{n}"))
+                    .font(type_::MONO_CAPTION)
+                    .color(t.text_secondary),
+            )
         }))
 }
 
 /// Key badge: the glyph of the trigger or label key.
 fn badge(r: &Row, t: SwitchTheme, accent: rune::Color) -> El {
     el().key("badge")
-        .size(26.0, 26.0)
+        .size(24.0, 24.0)
         .radius(6.0)
         .continuous_corners()
         .center()
         .fill(t.track)
         .child(
-            text(r.badge.map_or_else(|| "·".to_string(), |c| c.to_string()))
-                .font(type_::MONO_CAPTION.mono())
-                .color(accent),
+            text(
+                r.badge
+                    .map_or_else(|| "·".to_string(), |c| c.to_uppercase().collect()),
+            )
+            .font(type_::MONO_CAPTION.mono())
+            .color(accent),
         )
 }
 
@@ -247,8 +262,8 @@ fn app_tile(r: &Row, accent: rune::Color) -> El {
     if r.icon.size().0 > 0 {
         return el()
             .key("icon")
-            .size(28.0, 28.0)
-            .radius(8.0)
+            .size(ICON, ICON)
+            .radius(7.0)
             .continuous_corners()
             .pixels(&r.icon);
     }
@@ -263,8 +278,8 @@ fn monogram(r: &Row, accent: rune::Color) -> El {
         .next()
         .map_or('?', |c| c.to_uppercase().next().unwrap_or(c));
     el().key("monogram")
-        .size(28.0, 28.0)
-        .radius(8.0)
+        .size(ICON, ICON)
+        .radius(7.0)
         .continuous_corners()
         .center()
         .fill(accent.alpha(0.18))
