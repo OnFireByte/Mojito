@@ -15,7 +15,7 @@ pub enum Chord {
     /// Arrow/backspace positions; the engine fills `flags` from the
     /// triggering event (shift rides along, system chords never get here).
     Synth(SynthKey),
-    CycleInput,
+    ToggleInput,
     OpenPinned,
     ToggleMode,
     TriggerPin(u16),
@@ -29,7 +29,7 @@ pub struct Tables {
 }
 
 /// Build both tables from config. The hidden table is the const spec:
-/// h/j/k/l arrows, i backspace, enter cycle, m open, everything else unbound.
+/// h/j/k/l arrows, i backspace, enter toggles the input source, m open.
 /// The pinned table: user trigger keys first, then m toggle, then esc cancel.
 /// Duplicate trigger keys resolve first-wins; reserved keys never take a
 /// chord even if a malformed config carries them.
@@ -55,7 +55,7 @@ pub fn build_tables(config: &Config) -> Tables {
     put(&mut tables.hidden, PhysicalKey(0x28), synth(ARROW_UP)); // k
     put(&mut tables.hidden, PhysicalKey(0x25), synth(ARROW_RIGHT)); // l
     put(&mut tables.hidden, PhysicalKey(0x22), synth(BACKSPACE)); // i
-    put(&mut tables.hidden, RETURN, Chord::CycleInput);
+    put(&mut tables.hidden, RETURN, Chord::ToggleInput);
     put(&mut tables.hidden, M, Chord::OpenPinned);
 
     for (i, app) in config.pinned.iter().enumerate() {
@@ -100,7 +100,7 @@ mod tests {
         assert_eq!(t.hidden[0x28], Some(synth(ARROW_UP)));
         assert_eq!(t.hidden[0x25], Some(synth(ARROW_RIGHT)));
         assert_eq!(t.hidden[0x22], Some(synth(BACKSPACE)));
-        assert_eq!(t.hidden[RETURN.0 as usize], Some(Chord::CycleInput));
+        assert_eq!(t.hidden[RETURN.0 as usize], Some(Chord::ToggleInput));
         assert_eq!(t.hidden[M.0 as usize], Some(Chord::OpenPinned));
         // Everything else is unbound; the engine swallows those bare keys.
         let bound = [

@@ -6,6 +6,8 @@
 	<string>en</string>
 	<key>CFBundleExecutable</key>
 	<string>mojito</string>
+	<key>CFBundleIconFile</key>
+	<string>Mojito</string>
 	<key>CFBundleIdentifier</key>
 	<string>com.mojito.app</string>
 	<key>CFBundleInfoDictionaryVersion</key>

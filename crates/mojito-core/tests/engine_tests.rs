@@ -260,14 +260,14 @@ fn shift_chord_honored_on_routed_keys() {
 }
 
 #[test]
-fn meta_enter_cycles_input_once_and_ignores_autorepeat() {
+fn meta_enter_toggles_input_once_and_ignores_autorepeat() {
     let mut engine = standard_rig();
     engine.on_event(key(F18, true, 0));
     let down = engine.on_event(key(RET, true, 10));
-    assert_eq!(job(&down[1]), Some(&Job::CycleInputSource));
+    assert_eq!(job(&down[1]), Some(&Job::ToggleInputSource));
     assert_eq!(engine.on_event(repeated(RET, 100)), vec![Action::Swallow]);
     assert_eq!(engine.on_event(key(RET, false, 120)), vec![Action::Swallow]);
-    // Cycle input is decided by the table, not by phase churn afterwards.
+    // The input toggle is decided by the table, not by phase churn after.
     assert_eq!(engine.on_event(key(F18, false, 130)), vec![Action::Swallow]);
 }
 

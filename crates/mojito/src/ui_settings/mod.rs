@@ -187,6 +187,13 @@ pub fn run_child() {
     // Regular, not accessory: an accessory app's window cannot become key
     // when it opens, so the settings window would start unfocused.
     rune::run_windows_with_args(RunOptions { accessory: false }, Vec::new(), move |_| {
+        // Glyph lookups need this process's own snapshot: the hub builds
+        // one at startup, but TABLE lives per process, and without it every
+        // trigger badge renders the dash instead of its key's character.
+        layout::snapshot();
+        // The hint picker's saved choice decides which layout spells the
+        // badges, exactly as the hub applies it before the first reveal.
+        layout::set_display_layout(store.handle().load().hint_layout.clone());
         // The state's handle wants a Hub; a detached windowless hub app
         // satisfies it without adding a surface. This process's lifetime
         // is the settings window's, so no keep_running.

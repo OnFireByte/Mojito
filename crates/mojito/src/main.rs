@@ -70,6 +70,19 @@ fn main() {
             mojito_macos::index::debug_windows();
             return;
         }
+        Some("sources") => {
+            for source in tis::enabled() {
+                println!("{}\t{}", source.id, source.name);
+            }
+            match tis::current_id() {
+                Ok(id) => println!("current\t{id}"),
+                Err(error) => eprintln!("mojito: {error}"),
+            }
+            for name in tis::system_history_names() {
+                println!("history\t{name}");
+            }
+            return;
+        }
         Some("taps") => {
             mojito_macos::index::debug_taps();
             return;
@@ -285,8 +298,8 @@ fn hub_poll(s: &mut Hub, _: f64, _: &mut Tx) -> bool {
             Job::Switch(req) => {
                 switch::switch_to(&req, &mut |error| eprintln!("mojito: switch: {}", error.0))
             }
-            Job::CycleInputSource => {
-                if let Err(error) = tis::cycle() {
+            Job::ToggleInputSource => {
+                if let Err(error) = tis::toggle() {
                     eprintln!("mojito: input sources: {error}");
                 }
             }

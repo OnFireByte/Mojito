@@ -18,6 +18,11 @@ mkdir -p "$bundle/Contents/MacOS" "$bundle/Contents/Resources"
 cp "$root/target/release/mojito" "$executable"
 cp "$root/app/Info.plist" "$bundle/Contents/Info.plist"
 
+# Regenerate the icns from docs/icon/mojito.png so the shipped icon always
+# matches the source art.
+swift "$root/scripts/make-icon.swift"
+cp "$root/docs/icon/Mojito.icns" "$bundle/Contents/Resources/Mojito.icns"
+
 # Prefer the stable self-signed identity so the Accessibility grant survives
 # rebuilds; ad-hoc otherwise (every ad-hoc rebuild invalidates the grant).
 IDENTITY="Mojito Dev"

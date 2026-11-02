@@ -4,7 +4,7 @@ The synthesized design for Mojito, produced by an architect arena (three candida
 
 ## Goal
 
-Mojito turns Caps Lock into the hub of machine control so the user reaches any target with fewer finger movements. Tap Caps Lock sends Esc. Holding it engages a meta layer: meta+h/j/k/l are arrow keys, meta+i is backspace, meta+enter cycles input languages, meta+m opens the app switcher. Bindings are physical key positions and hold under any layout or input language. The switcher lists user-pinned apps with user-assigned trigger keys; pressing m again toggles to open apps with auto-assigned easy-reach labels (Colemak-DH ergonomics). Switching changes the window, not just the app. A settings window manages pinned apps and keys. macOS 15+ first, Rust, rune UI, resource budget: about zero idle CPU and an instant overlay.
+Mojito turns Caps Lock into the hub of machine control so the user reaches any target with fewer finger movements. Tap Caps Lock sends Esc. Holding it engages a meta layer: meta+h/j/k/l are arrow keys, meta+i is backspace, meta+enter toggles between the two most recent input languages, meta+m opens the app switcher. Bindings are physical key positions and hold under any layout or input language. The switcher lists user-pinned apps with user-assigned trigger keys; pressing m again toggles to open apps with auto-assigned easy-reach labels (Colemak-DH ergonomics). Switching changes the window, not just the app. A settings window manages pinned apps and keys. macOS 15+ first, Rust, rune UI, resource budget: about zero idle CPU and an instant overlay.
 
 ## Shape in one paragraph
 
@@ -129,14 +129,14 @@ The whole domain is two 128-slot tables built by one pure function; no runtime b
 pub struct Tables { hidden: [Option<Chord>; 128], pinned: [Option<Chord>; 128] }
 pub enum Chord {
     Synth(SynthKey),     // arrows/backspace; flags ride along
-    CycleInput,          // fresh presses only, autorepeat ignored
+    ToggleInput,         // fresh presses only, autorepeat ignored
     OpenPinned,          // meta+m
     ToggleMode,          // m again, both directions
     TriggerPin(u16),     // index into Config::pinned
     Label(u8),           // index into LiveModel rows
     Cancel,              // esc inside the overlay
 }
-// hidden[m]: h/j/k/l -> Synth(arrows), i -> Synth(backspace), enter -> CycleInput,
+// hidden[m]: h/j/k/l -> Synth(arrows), i -> Synth(backspace), enter -> ToggleInput,
 //            m -> OpenPinned, everything else None (pass iff flags has
 //            CMD/CTRL/OPT, else swallow).
 // pinned[m]: user trigger keys -> TriggerPin, m -> ToggleMode, esc -> Cancel.
@@ -209,7 +209,7 @@ pub struct PinnedRow { pub key: PhysicalKey, pub name: String, pub glyph: char }
 
 pub enum Job {
     Switch(SwitchRequest),        // activate + AX raise, on main
-    CycleInputSource,             // TISSelectInputSource, on main (TIS is main-thread-only)
+    ToggleInputSource,            // TISSelectInputSource, on main (TIS is main-thread-only)
     RefreshWindowCounts,          // CGWindowList counts into AppIndex, on main
     MergeLabels(LabelMemoryPatch) // sticky labels -> disk, debounced
 }
@@ -225,7 +225,7 @@ The whole UX in one matrix. `route[key]` makes every down decision bind its up; 
 |---|---|---|---|
 | h/j/k/l | synth arrow (flags kept) | label or swallow | label or swallow |
 | i | synth backspace | label or swallow | label or swallow |
-| return | CycleInput (fresh only) | label or swallow | label or swallow |
+| return | ToggleInput (fresh only) | label or swallow | label or swallow |
 | m | OpenPinned | ToggleMode | ToggleMode |
 | user trigger key | (unbound: swallow) | TriggerPin -> commit | n/a |
 | assigned label key | n/a | n/a | Label -> commit |
@@ -243,7 +243,7 @@ Commit = `Ui(Hide)` + `Job(Switch)` + `committed = true` while meta is held, or 
 - **Caps remap** (`mojito-macos::caps`): `hidutil property --get UserKeyMapping`, merge our `{src: 0x70000039, dst: 0x7000006D}` entry preserving foreign entries, `--set` (no root needed). Persist with `~/Library/LaunchAgents/com.mojito.caps.plist` (RunAtLoad, runs the same set), loaded via `launchctl bootstrap gui/$(id -u)`. Self-heal: a periodic `is_active()` check reinstalls and badges the status item if the mapping vanished (Sequoia Login-Items consent can disable the agent). Uninstall removes only our entry, matched on `Src == CAPS_USAGE` (a user may remap something else TO F18), boots out the agent, deletes the plist. Capture-off toggle restores stock Caps Lock.
 - **App index** (`mojito-macos::index`): main thread maintains a recency ring of running regular apps from NSWorkspace activation/launch/terminate observations and publishes `ArcSwap<AppIndex>`; `Job::RefreshWindowCounts` adds CGWindowList layer-0 window counts per pid when Pinned mode opens, so they are fresh by the time the user presses m again. The count spans every Space (`kCGWindowListOptionAll` + `kCGWindowListExcludeDesktopElements`, minimized windows included): an on-screen-only count saw one app when the frontmost Space was fullscreen, which emptied the live list. Live list = regular apps with at least one window on any Space, frontmost excluded, recency order. No `kCGWindowName` reads anywhere (it demands Screen Recording permission).
 - **Switching** (`mojito-macos::switch`): every AX call under `AXUIElementSetMessagingTimeout(0.25)` so a hung app cannot stall the gesture. Ladder: resolve pid by bundle id (`NSRunningApplication` lookup, else `NSWorkspace.openApplication` then re-resolve) -> `unhide()` if hidden -> `activate()` -> pick window via AX (`kAXFocusedWindowAttribute` -> `kAXMainWindowAttribute` -> windows[0] -> none) -> `kAXRaiseAction`. AXRaise runs even when `activate()` is refused; both run unconditionally. Degradation: Accessibility denied or no raisable window -> activation-only, and the settings pane says so plainly; switching to a Space with open windows completes the move. Minimized targets: clear `kAXMinimized` before raise.
-- **Input sources** (`mojito-macos::tis`): enabled sources via `TISCreateInputSourceList(null, false)` filtered to keyboard-category and select-capable; cycle = next of current via `TISSelectInputSource`, on the main thread only (overlapping TIS calls from worker threads crashed hex, release 2.1.12). This replaces the native Caps Lock input cycling the remap removes.
+- **Input sources** (`mojito-macos::tis`): enabled sources via `TISCreateInputSourceList(null, false)` filtered to keyboard-category and select-capable; the toggle returns to the source that was current before the most recent change (the hardware Caps Lock behavior the remap removes), with the next source in menu order standing in until history exists, via `TISSelectInputSource`, on the main thread only (overlapping TIS calls from worker threads crashed hex, release 2.1.12). The two-most-recent history is process-lifetime and observed at presses; macOS keeps no public record of it.
 - **Permissions** (`mojito-macos::permission`): `CGPreflightPostEventAccess()` (launch-frozen) + `AXIsProcessTrusted()` (live) both checked; prompt via `AXIsProcessTrustedWithOptions(kAXTrustedCheckOptionPrompt: YES)`; 250 ms poll starts the engine the moment the grant lands and stops once granted; still untrusted ~15 s after prompting offers a `tccutil` reset and re-prompt. Input Monitoring is never requested. Accessibility also grants listen-event access.
 - **Status item** (`mojito-macos::status_item`): `NSStatusItem` via objc2 (hex `macos_rune/status_item.rs:46-120` pattern), menu: Settings, Start at Login (SMAppService on a worker thread), Restore Caps Lock, About, Quit. Actions cross to the pump over a `SyncSender`.
 - **Layout glyphs** (`mojito-macos::layout`): one main-thread snapshot at startup of `UCKeyTranslate` over keycodes 0..128 from `TISCopyCurrentKeyboardLayoutInputSource`, refreshed on the distributed input-source-changed notification; converts `PhysicalKey` to display glyph for badges. TIS access stays behind one mutex and never re-enters from worker threads on a miss.
@@ -265,14 +265,14 @@ Commit = `Ui(Hide)` + `Job(Switch)` + `committed = true` while meta is held, or 
 ## Test and verification plan
 
 Pure, `cargo test`, any OS (all in `mojito-core`):
-- Engine golden sequences: tap -> exactly one Esc (down+up); hold+h -> Left down; held h autorepeat -> repeated Left downs, one up at release; meta+shift+h -> shift+Left; meta+enter -> CycleInput once; meta+m -> ShowPinned; m again -> ShowLive; m again -> Pinned; label -> commit + committed-inert leftovers; release -> Hide; esc -> HideFade; cmd+tab during hold -> Pass and marks used; unbound bare key -> swallow; F18 up stale (> tap_max_ms) -> no Esc; F18 up after a passed chord -> no Esc; route memory: every up obeys its down's decision, including after release; injected Reset from any state -> Idle + Hide; duplicate event (same key, direction, timestamp) repeats the decision with no side effects.
+- Engine golden sequences: tap -> exactly one Esc (down+up); hold+h -> Left down; held h autorepeat -> repeated Left downs, one up at release; meta+shift+h -> shift+Left; meta+enter -> ToggleInput once; meta+m -> ShowPinned; m again -> ShowLive; m again -> Pinned; label -> commit + committed-inert leftovers; release -> Hide; esc -> HideFade; cmd+tab during hold -> Pass and marks used; unbound bare key -> swallow; F18 up stale (> tap_max_ms) -> no Esc; F18 up after a passed chord -> no Esc; route memory: every up obeys its down's decision, including after release; injected Reset from any state -> Idle + Hide; duplicate event (same key, direction, timestamp) repeats the decision with no side effects.
 - Tables: hidden table equals the const spec; pinned table trigger keys win; duplicate trigger keys never yield two TriggerPins; reserved keys never yield chords.
 - Labels: determinism, injectivity, RESERVED skipped (m never assigned), pinned keys skipped, sticky memory honored when free and skipped when taken, priority tier membership pinned, overflow -> unlabeled.
 - Keycode spaces: golden test asserts `F18 = 0x4F`, `F18_USAGE = 0x7000006D`, and that the two constants differ (the trap that killed all three arena candidates).
 - Config: every recovery rule; duplicate keys first-wins; reserved keys rejected; round-trip.
 - Placement math: display containing a point across scaled and negative-origin displays; centered rect clamped to visible frame.
 
-Needs a human on macOS: LED stays dark and Caps never reaches any app (TextEdit before/after); Esc tap feels instant in Terminal; arrows and backspace under QWERTY, Dvorak, and a CJK IME (physical-position proof); Finder Option menus unaffected; meta+enter cycles three input sources; meta+m overlay appears with no first-frame stall, modes toggle, labels stable within a hold; switching moves the window across Spaces and displays, unminimizes, and degrades to activation-only when AX is denied; a hung app cannot stall the gesture; permission grant flips the engine live within 250 ms; sleep/wake and secure-input windows recover via the health timer; hidutil mapping survives reboot via the LaunchAgent and self-heals after consent revocation; uninstall leaves zero mapping entries and no plist; Activity Monitor shows about zero idle CPU and stable footprint (procwatch); bare-binary launch warns to bundle first; packaged .app keeps its TCC grant across rebuilds.
+Needs a human on macOS: LED stays dark and Caps never reaches any app (TextEdit before/after); Esc tap feels instant in Terminal; arrows and backspace under QWERTY, Dvorak, and a CJK IME (physical-position proof); Finder Option menus unaffected; meta+enter toggles between the two most recent input sources; meta+m overlay appears with no first-frame stall, modes toggle, labels stable within a hold; switching moves the window across Spaces and displays, unminimizes, and degrades to activation-only when AX is denied; a hung app cannot stall the gesture; permission grant flips the engine live within 250 ms; sleep/wake and secure-input windows recover via the health timer; hidutil mapping survives reboot via the LaunchAgent and self-heals after consent revocation; uninstall leaves zero mapping entries and no plist; Activity Monitor shows about zero idle CPU and stable footprint (procwatch); bare-binary launch warns to bundle first; packaged .app keeps its TCC grant across rebuilds.
 
 ## Known risks
 

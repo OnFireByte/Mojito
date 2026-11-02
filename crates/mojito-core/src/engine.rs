@@ -363,10 +363,10 @@ impl Engine {
                         }),
                     ]
                 }
-                Some(Chord::CycleInput) => {
+                Some(Chord::ToggleInput) => {
                     self.route[ix] = Route::Swallow;
                     self.phase = Phase::Held { committed: false };
-                    vec![Action::Swallow, Action::Job(Job::CycleInputSource)]
+                    vec![Action::Swallow, Action::Job(Job::ToggleInputSource)]
                 }
                 Some(Chord::OpenPinned) => {
                     self.route[ix] = Route::Swallow;

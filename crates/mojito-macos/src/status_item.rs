@@ -7,10 +7,27 @@ use std::sync::mpsc::SyncSender;
 
 use objc2::rc::Retained;
 use objc2::runtime::{AnyObject, NSObjectProtocol};
-use objc2::{DefinedClass, msg_send, sel};
+use objc2::{AnyThread, DefinedClass, msg_send, sel};
 use objc2::{MainThreadMarker, MainThreadOnly};
-use objc2_app_kit::{NSMenu, NSMenuItem, NSStatusBar, NSStatusItem};
-use objc2_foundation::NSString;
+use objc2_app_kit::{NSBitmapImageRep, NSImage, NSMenu, NSMenuItem, NSStatusBar, NSStatusItem};
+use objc2_foundation::{NSData, NSSize, NSString};
+
+/// The drink as menu-bar sprites: the 64px art nearest-decimated by
+/// scripts/make-icon.swift to the 1x/2x sizes, kept in-binary so the item
+/// works before and without the bundle.
+const STATUS_PNG_16: &[u8] = include_bytes!("../../../app/assets/mojito-status-16.png");
+const STATUS_PNG_32: &[u8] = include_bytes!("../../../app/assets/mojito-status-32.png");
+
+/// The status item image: the 32px sprite plus the 16px one as the 1x
+/// representation, drawn at 16pt. None if AppKit cannot decode the embedded
+/// PNGs, which would mean a build missing the generated assets.
+fn drink_image() -> Option<Retained<NSImage>> {
+    let image = NSImage::initWithData(NSImage::alloc(), &NSData::with_bytes(STATUS_PNG_32))?;
+    let small = NSBitmapImageRep::imageRepWithData(&NSData::with_bytes(STATUS_PNG_16))?;
+    image.addRepresentation(&small);
+    image.setSize(NSSize::new(16.0, 16.0));
+    Some(image)
+}
 
 pub enum MenuAction {
     OpenSettings,
@@ -101,7 +118,11 @@ pub fn install(tx: SyncSender<MenuAction>) -> Result<(), String> {
     let button = item
         .button(mtm)
         .ok_or_else(|| "status item button is unavailable".to_string())?;
-    button.setTitle(&NSString::from_str("Mojito"));
+    let Some(image) = drink_image() else {
+        return Err("the status sprite did not decode".into());
+    };
+    button.setImage(Some(&image));
+    button.setToolTip(Some(&NSString::from_str("Mojito")));
     item.setMenu(Some(&menu));
 
     STATUS_ITEM.with_borrow_mut(|slot| {
@@ -111,7 +132,7 @@ pub fn install(tx: SyncSender<MenuAction>) -> Result<(), String> {
 }
 
 /// Badge the item when self-heal reinstalls the hidutil mapping.
-/// NSStatusItem has no badge API; a title change is the honest signal.
+/// NSStatusItem has no badge API; an "!" beside the drink is the honest signal.
 pub fn set_needs_attention(flag: bool) {
     let Some(mtm) = MainThreadMarker::new() else {
         return;
@@ -123,7 +144,7 @@ pub fn set_needs_attention(flag: bool) {
         let Some(button) = controller.item.button(mtm) else {
             return;
         };
-        let title = if flag { "Mojito !" } else { "Mojito" };
+        let title = if flag { "!" } else { "" };
         button.setTitle(&NSString::from_str(title));
     });
 }
@@ -138,9 +159,7 @@ pub fn activate_self() {
     };
     // SAFETY: main thread, called after the run loop started.
     #[allow(deprecated)] // activateIgnoringOtherApps is the reliable self-activation
-    unsafe {
-        NSApplication::sharedApplication(mtm).activateIgnoringOtherApps(true);
-    }
+    NSApplication::sharedApplication(mtm).activateIgnoringOtherApps(true);
 }
 
 /// True when another process of this bundle is already running; activates

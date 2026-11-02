@@ -73,7 +73,8 @@ pub struct SwitchRequest {
 #[derive(Debug, PartialEq)]
 pub enum Job {
     Switch(SwitchRequest),
-    CycleInputSource,
+    /// Caps-style input-source toggle: return to the two-most-recent source.
+    ToggleInputSource,
     RefreshWindowCounts,
     MergeLabels(crate::labels::LabelMemory),
     /// The settings process saved; re-read the file and swap it in.

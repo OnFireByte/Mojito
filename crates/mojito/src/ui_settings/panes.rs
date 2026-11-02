@@ -190,7 +190,6 @@ fn catalog_card(s: &SettingsState, p: Paint) -> El {
                     })
                     .children(
                         list.iter()
-                            .take(40)
                             .enumerate()
                             .map(|(i, app)| catalog_row(p, i, app)),
                     ),
