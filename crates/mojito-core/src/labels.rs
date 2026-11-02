@@ -1,7 +1,7 @@
 //! Label assignment: deterministic, injective, Colemak-DH reach order.
 
 use crate::bridge::AppSlot;
-use crate::key::PhysicalKey;
+use crate::key::{ESC, F18, PhysicalKey, RETURN, SWITCHER};
 use std::collections::HashSet;
 
 /// QWERTY-position virtual keycodes, best reach first. The first ten are the
@@ -10,7 +10,7 @@ use std::collections::HashSet;
 /// center columns (G/H positions) rank below the strong top-row keys because
 /// demoting them is the whole point of the mod. Order within a tier is a
 /// product knob; tests pin tier membership and determinism.
-pub const LABEL_PRIORITY: [PhysicalKey; 27] = [
+pub const LABEL_PRIORITY: [PhysicalKey; 26] = [
     PhysicalKey(0x03), // f  home, left index
     PhysicalKey(0x02), // d  home, left middle
     PhysicalKey(0x01), // s  home, left ring
@@ -23,7 +23,6 @@ pub const LABEL_PRIORITY: [PhysicalKey; 27] = [
     PhysicalKey(0x2E), // m  bottom index curl (DH's H position)
     PhysicalKey(0x11), // t  top, left index
     PhysicalKey(0x10), // y  top, right index
-    PhysicalKey(0x0E), // e  top, left middle
     PhysicalKey(0x20), // u  top, right middle
     PhysicalKey(0x0F), // r  top, left ring
     PhysicalKey(0x22), // i  top, right ring
@@ -42,12 +41,7 @@ pub const LABEL_PRIORITY: [PhysicalKey; 27] = [
 
 /// Keys no label or pin may ever take. Enforced in config validation and in
 /// label assignment; single source of truth.
-pub const RESERVED: [PhysicalKey; 4] = [
-    PhysicalKey(0x4F), // F18: the meta key itself
-    PhysicalKey(0x35), // esc: cancel
-    PhysicalKey(0x24), // return: reserved for a future confirm
-    PhysicalKey(0x0E), // e: the switcher and mode toggle
-];
+pub const RESERVED: [PhysicalKey; 4] = [F18, ESC, RETURN, SWITCHER];
 
 /// Sticky label memory: an app keeps its last label when that key is free
 /// this activation, so labels stay consistent across activations.
@@ -55,11 +49,9 @@ pub const RESERVED: [PhysicalKey; 4] = [
 pub struct LabelMemory(pub std::collections::BTreeMap<String, PhysicalKey>);
 
 /// Assign labels to rows in the given (recency) order. Walk LABEL_PRIORITY
-/// skipping RESERVED and pinned trigger keys; grant a sticky remembered label
-/// first when free; rows beyond the pool get no label. Returns one entry per
-/// input row, in order. Note: the `e` position in LABEL_PRIORITY is always
-/// skipped because `e` is reserved for the mode toggle, so the effective pool
-/// is 26 keys.
+/// skipping pinned trigger keys; grant a sticky remembered label first when
+/// free; rows beyond the pool get no label. Returns one entry per input row,
+/// in order.
 pub fn assign_labels(
     rows: &[AppSlot],
     memory: &LabelMemory,
@@ -82,7 +74,7 @@ pub fn assign_labels(
             while cursor < LABEL_PRIORITY.len() {
                 let key = LABEL_PRIORITY[cursor];
                 cursor += 1;
-                if RESERVED.contains(&key) || pinned.contains(&key) || used.contains(&key) {
+                if pinned.contains(&key) || used.contains(&key) {
                     continue;
                 }
                 used.insert(key);
@@ -98,7 +90,6 @@ pub fn assign_labels(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::key::{ESC, F18, SWITCHER, RETURN};
 
     fn slot(pid: i32, bundle: Option<&str>) -> AppSlot {
         AppSlot {
@@ -108,15 +99,6 @@ mod tests {
             windows: 1,
             is_frontmost: false,
         }
-    }
-
-    /// The full pool, in order, minus the reserved `e` position.
-    fn pool() -> Vec<PhysicalKey> {
-        LABEL_PRIORITY
-            .iter()
-            .copied()
-            .filter(|k| !RESERVED.contains(k))
-            .collect()
     }
 
     #[test]
@@ -139,9 +121,8 @@ mod tests {
         // top-row keys, pinky corners last.
         let rows: Vec<AppSlot> = (0..26).map(|i| slot(i, Some(&format!("b{i}")))).collect();
         let labels = assign_labels(&rows, &LabelMemory::default(), &[]);
-        let expected = pool();
         let got: Vec<PhysicalKey> = labels.iter().copied().flatten().collect();
-        assert_eq!(got, expected);
+        assert_eq!(got, LABEL_PRIORITY);
         // The reserved keys never appear even with demand for every key.
         for reserved in [F18, ESC, RETURN, SWITCHER] {
             assert!(!got.contains(&reserved));

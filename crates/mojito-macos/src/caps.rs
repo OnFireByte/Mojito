@@ -63,12 +63,7 @@ impl CapsMap {
     /// replayed too; mappings added after this call are clobbered by the
     /// next login (documented v1 limitation).
     pub fn ensure_agent(&self) -> Result<(), String> {
-        let Some(home) = std::env::var_os("HOME") else {
-            return Err("no home directory; cannot install the LaunchAgent".into());
-        };
-        let plist = std::path::Path::new(&home)
-            .join("Library/LaunchAgents")
-            .join(format!("{AGENT_LABEL}.plist"));
+        let plist = agent_plist().ok_or("no home directory; cannot install the LaunchAgent")?;
         if let Some(parent) = plist.parent() {
             std::fs::create_dir_all(parent)
                 .map_err(|error| format!("could not create LaunchAgents: {error}"))?;
@@ -77,7 +72,7 @@ impl CapsMap {
         let payload = plist_xml(&mapping);
         std::fs::write(&plist, payload)
             .map_err(|error| format!("could not write {}: {error}", plist.display()))?;
-        let uid = current_uid();
+        let uid = getuid();
         let label_path = format!("gui/{uid}/{AGENT_LABEL}");
         let bootstrapped = Command::new("/bin/launchctl")
             .args(["bootstrap", &format!("gui/{uid}"), &plist.to_string_lossy()])
@@ -190,7 +185,10 @@ fn block_value(block: &str, key: &str) -> Option<u64> {
     let value = value
         .split(|c: char| c == ';' || c == ',' || c == '}' || c.is_whitespace())
         .next()?;
-    if let Some(hex) = value.strip_prefix("0x").or_else(|| value.strip_prefix("0X")) {
+    if let Some(hex) = value
+        .strip_prefix("0x")
+        .or_else(|| value.strip_prefix("0X"))
+    {
         u64::from_str_radix(hex, 16).ok()
     } else {
         value.parse().ok()
@@ -218,7 +216,10 @@ fn entry_json(pair: (u64, u64)) -> String {
 fn merge_mapping(existing: &str, ours: (u64, u64)) -> Result<String, String> {
     let mut entries = entries_from(existing)?;
     entries.retain(|entry| entry.src != ours.0);
-    entries.push(MappingEntry { src: ours.0, dst: ours.1 });
+    entries.push(MappingEntry {
+        src: ours.0,
+        dst: ours.1,
+    });
     Ok(serialize(&entries))
 }
 
@@ -231,19 +232,25 @@ fn without_entry(existing: &str, src: u64) -> Result<String, String> {
 
 /// True when some entry maps exactly `src -> dst`. Pure; unit-tested.
 fn contains_pair(existing: &str, ours: (u64, u64)) -> bool {
-    entries_from(existing)
-        .is_ok_and(|entries| entries.iter().any(|entry| entry.src == ours.0 && entry.dst == ours.1))
+    entries_from(existing).is_ok_and(|entries| {
+        entries
+            .iter()
+            .any(|entry| entry.src == ours.0 && entry.dst == ours.1)
+    })
 }
 
-/// The current user id, for `launchctl bootstrap gui/<uid>`.
-fn current_uid() -> u32 {
-    // SAFETY: `getuid` has no failure mode and no preconditions.
-    unsafe { getuid() }
-}
-
-#[allow(non_snake_case)]
+// SAFETY: `getuid` takes no arguments, cannot fail, and has no preconditions.
 unsafe extern "C" {
-    fn getuid() -> u32;
+    safe fn getuid() -> u32;
+}
+
+fn agent_plist() -> Option<std::path::PathBuf> {
+    let home = std::env::var_os("HOME")?;
+    Some(
+        std::path::Path::new(&home)
+            .join("Library/LaunchAgents")
+            .join(format!("{AGENT_LABEL}.plist")),
+    )
 }
 
 /// The LaunchAgent body: run the same `hidutil property --set` at login.
@@ -271,25 +278,23 @@ fn plist_xml(mapping: &str) -> String {
 }
 
 fn bootout_agent() {
-    let uid = current_uid();
+    let uid = getuid();
     let _ = Command::new("/bin/launchctl")
         .args(["bootout", &format!("gui/{uid}/{AGENT_LABEL}")])
         .status();
 }
 
 fn delete_plist() {
-    if let Some(home) = std::env::var_os("HOME") {
-        let plist = std::path::Path::new(&home)
-            .join("Library/LaunchAgents")
-            .join(format!("{AGENT_LABEL}.plist"));
-        match std::fs::remove_file(&plist) {
-            Ok(()) => {}
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-            Err(error) => eprintln!(
-                "mojito-macos: could not delete {}: {error}",
-                plist.display()
-            ),
-        }
+    let Some(plist) = agent_plist() else {
+        return;
+    };
+    match std::fs::remove_file(&plist) {
+        Ok(()) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => eprintln!(
+            "mojito-macos: could not delete {}: {error}",
+            plist.display()
+        ),
     }
 }
 
@@ -328,7 +333,13 @@ mod tests {
         let text = "( { HIDKeyboardModifierMappingDst = 0x70000006D; HIDKeyboardModifierMappingSrc = 0x70000002A; }, { HIDKeyboardModifierMappingDst = 5; HIDKeyboardModifierMappingSrc = 6; } )";
         let entries = entries_from(text).unwrap();
         assert_eq!(entries.len(), 2);
-        assert_eq!(entries[0], MappingEntry { src: 0x70000002A, dst: 0x70000006D });
+        assert_eq!(
+            entries[0],
+            MappingEntry {
+                src: 0x70000002A,
+                dst: 0x70000006D
+            }
+        );
         assert_eq!(entries[1], MappingEntry { src: 6, dst: 5 });
     }
 
@@ -343,7 +354,13 @@ mod tests {
         let merged = merge_mapping("[]", OURS).unwrap();
         let entries = entries_from(&merged).unwrap();
         assert_eq!(entries.len(), 1);
-        assert_eq!(entries[0], MappingEntry { src: OURS.0, dst: OURS.1 });
+        assert_eq!(
+            entries[0],
+            MappingEntry {
+                src: OURS.0,
+                dst: OURS.1
+            }
+        );
     }
 
     #[test]
@@ -374,8 +391,7 @@ mod tests {
     fn merge_replaces_a_foreign_caps_lock_remap() {
         // A pre-existing remap OF caps lock is replaced by ours; that is the
         // product's premise. The plist form is what this machine prints.
-        let existing =
-            "( {\n    HIDKeyboardModifierMappingDst = 30064771113;\n    HIDKeyboardModifierMappingSrc = 30064771129;\n} )";
+        let existing = "( {\n    HIDKeyboardModifierMappingDst = 30064771113;\n    HIDKeyboardModifierMappingSrc = 30064771129;\n} )";
         let merged = merge_mapping(existing, OURS).unwrap();
         assert!(contains_pair(&merged, OURS));
         assert!(!contains_pair(&merged, (OURS.0, 30064771113)));
@@ -408,7 +424,10 @@ mod tests {
     #[test]
     fn serialize_round_trips_through_the_parser() {
         let entries = vec![
-            MappingEntry { src: OURS.0, dst: OURS.1 },
+            MappingEntry {
+                src: OURS.0,
+                dst: OURS.1,
+            },
             MappingEntry { src: 42, dst: 43 },
         ];
         let parsed = entries_from(&serialize(&entries)).unwrap();

@@ -75,7 +75,8 @@ objc2::define_class!(
 impl MenuTarget {
     fn new(actions: SyncSender<MenuAction>, mtm: MainThreadMarker) -> Retained<Self> {
         let this = Self::alloc(mtm).set_ivars(MenuTargetIvars { actions });
-        // SAFETY: the standard NSObject init; the class has no init override.
+        // SAFETY: NSObject's designated initializer on a fresh allocation whose
+        // ivars are already set; the class does not override init.
         unsafe { msg_send![super(this), init] }
     }
 }
@@ -108,7 +109,7 @@ pub fn install(tx: SyncSender<MenuAction>) -> Result<(), String> {
     add_item(&menu, &target, "Start at Login", sel!(toggleLogin:), mtm);
     add_item(&menu, &target, "Restore Caps Lock", sel!(restoreCaps:), mtm);
     // About has no engine action; show it plain and disabled.
-    let about = plain_item("About Mojito", mtm);
+    let about = menu_item("About Mojito", None, mtm);
     about.setEnabled(false);
     menu.addItem(&about);
     menu.addItem(&NSMenuItem::separatorItem(mtm));
@@ -152,12 +153,10 @@ pub fn set_needs_attention(flag: bool) {
 /// Activate this process: the settings child spawns without an activation
 /// ceremony, and its window must land frontmost and key.
 pub fn activate_self() {
-    use objc2::MainThreadMarker;
     use objc2_app_kit::NSApplication;
     let Some(mtm) = MainThreadMarker::new() else {
         return;
     };
-    // SAFETY: main thread, called after the run loop started.
     #[allow(deprecated)] // activateIgnoringOtherApps is the reliable self-activation
     NSApplication::sharedApplication(mtm).activateIgnoringOtherApps(true);
 }
@@ -167,10 +166,9 @@ pub fn activate_self() {
 /// intercept keys and fight over the overlay.
 pub fn activate_existing() -> bool {
     use objc2_app_kit::{NSApplicationActivationOptions, NSRunningApplication};
-    use objc2_foundation::NSString;
-    let apps = NSRunningApplication::runningApplicationsWithBundleIdentifier(
-        &NSString::from_str("com.mojito.app"),
-    );
+    let apps = NSRunningApplication::runningApplicationsWithBundleIdentifier(&NSString::from_str(
+        "com.mojito.app",
+    ));
     let own = std::process::id() as i32;
     let other = apps
         .to_vec()
@@ -192,25 +190,27 @@ fn add_item(
     action: objc2::runtime::Sel,
     mtm: MainThreadMarker,
 ) -> Retained<NSMenuItem> {
-    let item = unsafe {
-        NSMenuItem::initWithTitle_action_keyEquivalent(
-            NSMenuItem::alloc(mtm),
-            &NSString::from_str(title),
-            Some(action),
-            &NSString::new(),
-        )
-    };
+    let item = menu_item(title, Some(action), mtm);
+    // SAFETY: every action passed here is a method `MenuTarget` defines with
+    // the `(&self, sender)` shape AppKit calls, and `target` is kept alive
+    // by `StatusItemController` because NSMenuItem holds it weakly.
     unsafe { item.setTarget(Some(target)) };
     menu.addItem(&item);
     item
 }
 
-fn plain_item(title: &str, mtm: MainThreadMarker) -> Retained<NSMenuItem> {
+fn menu_item(
+    title: &str,
+    action: Option<objc2::runtime::Sel>,
+    mtm: MainThreadMarker,
+) -> Retained<NSMenuItem> {
+    // SAFETY: a fresh allocation is initialized exactly once; the action is
+    // either none or paired with a target by `add_item`.
     unsafe {
         NSMenuItem::initWithTitle_action_keyEquivalent(
             NSMenuItem::alloc(mtm),
             &NSString::from_str(title),
-            None,
+            action,
             &NSString::new(),
         )
     }

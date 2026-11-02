@@ -175,7 +175,6 @@ impl SettingsState {
 
 /// Runs when the status item opens the window (right after `open`).
 pub fn opened(s: &mut SettingsState, tx: &mut Tx) {
-    eprintln!("mojito: settings window live"); // TEMP diagnosis
     s.reload();
     s.live_refresh = true;
     tx.wake_after(REFRESH_AFTER);
@@ -228,15 +227,6 @@ pub fn closed(s: &mut SettingsState, _: &mut Tx) {
     s.hint_menu_open = false;
     close_catalog(s);
     s.live_refresh = false;
-    let usage = procwatch::usage();
-    let mb = |bytes: Option<u64>| {
-        bytes.map_or_else(|| "?".into(), |b| format!("{:.1}MB", b as f64 / 1e6))
-    };
-    eprintln!(
-        "mojito: settings closed; footprint {} peak {}",
-        mb(usage.footprint),
-        mb(usage.footprint_peak)
-    ); // TEMP diagnosis
 }
 
 /// Settings poll: delivers the catalog scan, clears the save toast, and
@@ -345,13 +335,10 @@ fn remove_row(s: &mut SettingsState, row: usize) {
     };
 }
 
-/// First free key in reach order, skipping reserved and already-pinned keys.
+/// First free key in reach order, skipping already-pinned keys.
 fn next_free_key(s: &SettingsState) -> Option<PhysicalKey> {
     let used: Vec<PhysicalKey> = s.rows.iter().filter_map(|r| r.key).collect();
-    LABEL_PRIORITY
-        .iter()
-        .copied()
-        .find(|k| !RESERVED.contains(k) && !used.contains(k))
+    LABEL_PRIORITY.iter().copied().find(|k| !used.contains(k))
 }
 
 fn add_app(s: &mut SettingsState, app: &CatalogApp) {

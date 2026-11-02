@@ -7,7 +7,7 @@ use mojito_core::{
     Action, AppIndex, AppRef, Config, Engine, Job, ModifierFlags, Mono, PhysicalKey, PinnedApp,
     RawKey, SwitchRequest, SynthKey, UiMsg,
 };
-use std::sync::{Arc, mpsc};
+use std::sync::Arc;
 
 const H: u16 = 0x04;
 const J: u16 = 0x26;
@@ -35,9 +35,7 @@ fn rig(pinned: Vec<PinnedApp>, slots: Vec<AppSlot>) -> Engine {
         ..Default::default()
     }));
     let index = Arc::new(ArcSwap::from_pointee(AppIndex { slots }));
-    let (ui, _) = mpsc::sync_channel(64);
-    let (jobs, _) = mpsc::sync_channel(64);
-    Engine::new(config, index, ui, jobs)
+    Engine::new(config, index)
 }
 
 fn standard_rig() -> Engine {
@@ -260,6 +258,32 @@ fn shift_chord_honored_on_routed_keys() {
 }
 
 #[test]
+fn cmd_opt_ctrl_ride_along_on_routed_keys_through_repeat_and_up() {
+    let chord = ModifierFlags(
+        ModifierFlags::CMD.0 | ModifierFlags::OPT.0 | ModifierFlags::CTRL.0 | ModifierFlags::SHIFT.0,
+    );
+    let arrow = |down| {
+        vec![
+            Action::Swallow,
+            Action::Synth(SynthKey {
+                key: ARROW_LEFT,
+                down,
+                flags: chord,
+            }),
+        ]
+    };
+    let mut engine = standard_rig();
+    engine.on_event(key(F18, true, 0));
+    assert_eq!(engine.on_event(flagged(H, true, 10, chord)), arrow(true));
+    let repeat = RawKey {
+        repeat: true,
+        ..flagged(H, true, 20, chord)
+    };
+    assert_eq!(engine.on_event(repeat), arrow(true));
+    assert_eq!(engine.on_event(flagged(H, false, 30, chord)), arrow(false));
+}
+
+#[test]
 fn meta_enter_toggles_input_once_and_ignores_autorepeat() {
     let mut engine = standard_rig();
     engine.on_event(key(F18, true, 0));
@@ -309,6 +333,16 @@ fn m_toggles_pinned_live_pinned() {
     }
     let back = engine.on_event(key(SWITCHER, true, 30));
     assert!(matches!(ui(&back[1]), Some(UiMsg::ShowPinned { .. })));
+}
+
+#[test]
+fn pinned_trigger_key_is_inert_in_the_live_list() {
+    let mut engine = standard_rig();
+    engine.on_event(key(F18, true, 0));
+    engine.on_event(key(SWITCHER, true, 10));
+    engine.on_event(key(SWITCHER, true, 20));
+    assert_eq!(engine.on_event(key(TRIGGER, true, 30)), vec![Action::Swallow]);
+    assert_eq!(engine.on_event(key(TRIGGER, false, 40)), vec![Action::Swallow]);
 }
 
 #[test]
@@ -657,9 +691,7 @@ fn reset_from_any_state_returns_to_idle_and_hides() {
 fn settings_save_rebuilds_tables_on_the_next_gesture() {
     let config = Arc::new(ArcSwap::from_pointee(Config::default()));
     let index = Arc::new(ArcSwap::from_pointee(AppIndex::default()));
-    let (ui_tx, _) = mpsc::sync_channel(64);
-    let (job_tx, _) = mpsc::sync_channel(64);
-    let mut engine = Engine::new(config.clone(), index, ui_tx, job_tx);
+    let mut engine = Engine::new(config.clone(), index);
     engine.on_event(key(F18, true, 0));
     // Simulate a settings save: the store bumps the version, the engine
     // rebuilds its tables lazily on the next event.

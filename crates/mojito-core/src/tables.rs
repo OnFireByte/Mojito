@@ -2,19 +2,19 @@
 //! by one pure function. No runtime branching decides what a key means.
 
 use crate::config::Config;
-use crate::engine::SynthKey;
 use crate::key::{
-    ARROW_DOWN, ARROW_LEFT, ARROW_RIGHT, ARROW_UP, BACKSPACE, ESC, SWITCHER, ModifierFlags, PhysicalKey,
-    RETURN,
+    ARROW_DOWN, ARROW_LEFT, ARROW_RIGHT, ARROW_UP, BACKSPACE, ESC, PhysicalKey, RETURN, SWITCHER,
 };
+
+pub const TABLE_SLOTS: usize = 128;
 
 /// What a key does in a phase. Labels live in [`crate::bridge::LiveModel`],
 /// not here; pinned trigger keys land in the pinned table.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Chord {
     /// Arrow/backspace positions; the engine fills `flags` from the
-    /// triggering event (shift rides along, system chords never get here).
-    Synth(SynthKey),
+    /// triggering event's shift/ctrl/opt/cmd.
+    Synth(PhysicalKey),
     ToggleInput,
     OpenPinned,
     ToggleMode,
@@ -24,8 +24,8 @@ pub enum Chord {
 
 #[derive(Clone, Copy, Debug)]
 pub struct Tables {
-    pub hidden: [Option<Chord>; 128],
-    pub pinned: [Option<Chord>; 128],
+    pub hidden: [Option<Chord>; TABLE_SLOTS],
+    pub pinned: [Option<Chord>; TABLE_SLOTS],
 }
 
 /// Build both tables from config. The hidden table is the const spec:
@@ -35,26 +35,19 @@ pub struct Tables {
 /// chord even if a malformed config carries them.
 pub fn build_tables(config: &Config) -> Tables {
     let mut tables = Tables {
-        hidden: [None; 128],
-        pinned: [None; 128],
+        hidden: [None; TABLE_SLOTS],
+        pinned: [None; TABLE_SLOTS],
     };
-    let synth = |key| {
-        Chord::Synth(SynthKey {
-            key,
-            down: true,
-            flags: ModifierFlags::NONE,
-        })
-    };
-    let put = |slot: &mut [Option<Chord>; 128], key: PhysicalKey, chord: Chord| {
+    let put = |slot: &mut [Option<Chord>; TABLE_SLOTS], key: PhysicalKey, chord: Chord| {
         if (key.0 as usize) < slot.len() {
             slot[key.0 as usize] = Some(chord);
         }
     };
-    put(&mut tables.hidden, PhysicalKey(0x04), synth(ARROW_LEFT)); // h
-    put(&mut tables.hidden, PhysicalKey(0x26), synth(ARROW_DOWN)); // j
-    put(&mut tables.hidden, PhysicalKey(0x28), synth(ARROW_UP)); // k
-    put(&mut tables.hidden, PhysicalKey(0x25), synth(ARROW_RIGHT)); // l
-    put(&mut tables.hidden, PhysicalKey(0x22), synth(BACKSPACE)); // i
+    put(&mut tables.hidden, PhysicalKey(0x04), Chord::Synth(ARROW_LEFT)); // h
+    put(&mut tables.hidden, PhysicalKey(0x26), Chord::Synth(ARROW_DOWN)); // j
+    put(&mut tables.hidden, PhysicalKey(0x28), Chord::Synth(ARROW_UP)); // k
+    put(&mut tables.hidden, PhysicalKey(0x25), Chord::Synth(ARROW_RIGHT)); // l
+    put(&mut tables.hidden, PhysicalKey(0x22), Chord::Synth(BACKSPACE)); // i
     put(&mut tables.hidden, RETURN, Chord::ToggleInput);
     put(&mut tables.hidden, SWITCHER, Chord::OpenPinned);
 
@@ -62,7 +55,7 @@ pub fn build_tables(config: &Config) -> Tables {
         if crate::labels::RESERVED.contains(&app.key) {
             continue;
         }
-        if tables.pinned[app.key.0 as usize].is_some() {
+        if matches!(tables.pinned.get(app.key.0 as usize), Some(Some(_))) {
             continue; // first-wins on duplicate trigger keys
         }
         put(&mut tables.pinned, app.key, Chord::TriggerPin(i as u16));
@@ -88,18 +81,11 @@ mod tests {
     #[test]
     fn hidden_table_matches_the_const_spec() {
         let t = build_tables(&Config::default());
-        let synth = |key| {
-            Chord::Synth(SynthKey {
-                key,
-                down: true,
-                flags: ModifierFlags::NONE,
-            })
-        };
-        assert_eq!(t.hidden[0x04], Some(synth(ARROW_LEFT)));
-        assert_eq!(t.hidden[0x26], Some(synth(ARROW_DOWN)));
-        assert_eq!(t.hidden[0x28], Some(synth(ARROW_UP)));
-        assert_eq!(t.hidden[0x25], Some(synth(ARROW_RIGHT)));
-        assert_eq!(t.hidden[0x22], Some(synth(BACKSPACE)));
+        assert_eq!(t.hidden[0x04], Some(Chord::Synth(ARROW_LEFT)));
+        assert_eq!(t.hidden[0x26], Some(Chord::Synth(ARROW_DOWN)));
+        assert_eq!(t.hidden[0x28], Some(Chord::Synth(ARROW_UP)));
+        assert_eq!(t.hidden[0x25], Some(Chord::Synth(ARROW_RIGHT)));
+        assert_eq!(t.hidden[0x22], Some(Chord::Synth(BACKSPACE)));
         assert_eq!(t.hidden[RETURN.0 as usize], Some(Chord::ToggleInput));
         assert_eq!(t.hidden[SWITCHER.0 as usize], Some(Chord::OpenPinned));
         // Everything else is unbound; the engine swallows those bare keys.

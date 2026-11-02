@@ -5,8 +5,8 @@
 
 use rune::tok::type_;
 use rune::{
-    Color, Cx, El, KeyPolicy, OverlayHandle, OverlayInput, OverlayOptions, OverlaySpec, Pixels,
-    Shadow, SystemMaterial, TextStyle, col, el, row, text,
+    Color, Cx, El, KeyPolicy, OverlayInput, OverlayOptions, OverlaySpec, Pixels, Shadow,
+    SystemMaterial, TextStyle, col, el, row, text,
 };
 use rune::{ConfiguredOverlay, DisplayTarget};
 
@@ -17,6 +17,7 @@ const CARD_RADIUS: f32 = 22.0;
 const HEADER_H: f32 = 34.0;
 const ROW_H: f32 = 36.0;
 const ICON: f32 = 24.0;
+const ROW_GAP: f32 = 2.0;
 const PAD: f32 = 12.0;
 const MAX_ROWS: usize = 12;
 
@@ -49,8 +50,6 @@ struct SwitchTheme {
 pub struct Switcher {
     mode: Option<Mode>,
     rows: Vec<Row>,
-    /// This overlay's own handle, needed to fade out on the backdrop press.
-    pub(crate) me: Option<OverlayHandle<Switcher>>,
 }
 
 impl Switcher {
@@ -66,8 +65,9 @@ pub fn window_size(rows: usize) -> (f32, f32) {
 }
 
 fn card_height(rows: usize) -> f32 {
-    let shown = rows.min(MAX_ROWS) as f32;
-    let mut h = HEADER_H + PAD + shown * ROW_H + PAD;
+    let shown = rows.min(MAX_ROWS);
+    let gaps = shown.saturating_sub(1) as f32 * ROW_GAP;
+    let mut h = HEADER_H + PAD + shown as f32 * ROW_H + gaps + PAD;
     if rows > MAX_ROWS {
         h += ROW_H; // the "+N more" footer row
     }
@@ -128,7 +128,7 @@ pub fn view(s: &Switcher, cx: &mut Cx<Switcher>) -> El {
             ),
         );
     } else {
-        let rows = col().key("rows").w_full().gap(2.0).children(
+        let rows = col().key("rows").w_full().gap(ROW_GAP).children(
             s.rows
                 .iter()
                 .take(MAX_ROWS)

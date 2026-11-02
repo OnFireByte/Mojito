@@ -1,49 +1,15 @@
 //! App icons as straight RGBA the UI can hand to rune's `Pixels`.
 
-use std::ffi::c_void;
-use std::ptr;
-
-use objc2::msg_send;
-use objc2_app_kit::{NSRunningApplication, NSWorkspace};
+use objc2_app_kit::{NSImage, NSRunningApplication, NSWorkspace};
+use objc2_core_foundation::{CGPoint, CGRect, CGSize};
+use objc2_core_graphics::{CGBitmapContextCreate, CGColorSpace, CGContext, CGImageAlphaInfo};
 use objc2_foundation::NSString;
-
-type ImageRef = *const c_void;
-
-#[link(name = "CoreGraphics", kind = "framework")]
-unsafe extern "C" {
-    fn CGColorSpaceCreateDeviceRGB() -> ImageRef;
-    fn CGColorSpaceRelease(space: ImageRef);
-    fn CGBitmapContextCreate(
-        data: *mut c_void,
-        width: usize,
-        height: usize,
-        bits_per_component: usize,
-        bytes_per_row: usize,
-        space: ImageRef,
-        bitmap_info: u32,
-    ) -> *mut c_void;
-    fn CGContextDrawImage(context: *mut c_void, rect: CGRect, image: ImageRef);
-}
-
-#[repr(C)]
-#[derive(Clone, Copy)]
-struct CGRect {
-    x: f64,
-    y: f64,
-    width: f64,
-    height: f64,
-}
-
-/// `kCGImageAlphaPremultipliedLast`.
-const PREMULTIPLIED_LAST: u32 = 1;
 
 /// The app's icon rendered into `size` x `size` RGBA bytes. The running
 /// instance's icon comes first; the bundle's file icon covers pinned-but-
 /// quit apps. Call on the main thread (AppKit).
 pub fn app_icon_rgba(bundle: &str, size: u32) -> Option<Vec<u8>> {
     let bundle = NSString::from_str(bundle);
-    // SAFETY: AppKit calls on the main thread; returned NSImages are
-    // retained and released by their wrappers.
     let image = {
         let apps = NSRunningApplication::runningApplicationsWithBundleIdentifier(&bundle);
         let running = apps.to_vec().into_iter().find(|app| !app.isTerminated());
@@ -61,46 +27,33 @@ pub fn app_icon_rgba(bundle: &str, size: u32) -> Option<Vec<u8>> {
 }
 
 /// Draw an NSImage into a square RGBA bitmap context and copy the bytes.
-fn render_rgba(image: &objc2_app_kit::NSImage, size: u32) -> Option<Vec<u8>> {
-    // SAFETY: `image` is a live NSImage; every CG object created here is
-    // released on all paths, and the buffer outlives the context.
-    unsafe {
-        let cg: ImageRef = msg_send![
-            image,
-            CGImageForProposedRect: ptr::null_mut::<c_void>(),
-            context: ptr::null_mut::<c_void>(),
-            hints: ptr::null_mut::<c_void>(),
-        ];
-        if cg.is_null() {
-            return None;
-        }
-        let space = CGColorSpaceCreateDeviceRGB();
-        if space.is_null() {
-            return None;
-        }
-        let stride = size as usize * 4;
-        let mut buffer = vec![0_u8; stride * size as usize];
-        let context = CGBitmapContextCreate(
+fn render_rgba(image: &NSImage, size: u32) -> Option<Vec<u8>> {
+    // SAFETY: a null proposed rect asks for the image's own size, and no
+    // context or hints are passed.
+    let cg_image =
+        unsafe { image.CGImageForProposedRect_context_hints(std::ptr::null_mut(), None, None) }?;
+    let space = CGColorSpace::new_device_rgb()?;
+    let side = size as usize;
+    let stride = side * 4;
+    let mut buffer = vec![0_u8; stride * side];
+    // SAFETY: `buffer` holds exactly `stride * side` bytes and outlives the
+    // context, which is dropped at the end of this function before `buffer`
+    // is returned.
+    let context = unsafe {
+        CGBitmapContextCreate(
             buffer.as_mut_ptr().cast(),
-            size as usize,
-            size as usize,
+            side,
+            side,
             8,
             stride,
-            space,
-            PREMULTIPLIED_LAST,
-        );
-        if context.is_null() {
-            CGColorSpaceRelease(space);
-            return None;
-        }
-        // CG images draw upright into a bitmap context without a flip; the
-        // earlier translate+scale flip turned them upside down.
-        CGContextDrawImage(
-            context,
-            CGRect { x: 0.0, y: 0.0, width: f64::from(size), height: f64::from(size) },
-            cg,
-        );
-        // The context drew straight into `buffer`; no copy call needed.
-        Some(buffer)
-    }
+            Some(&space),
+            CGImageAlphaInfo::PremultipliedLast.0,
+        )
+    }?;
+    // CG images draw upright into a bitmap context without a flip; the
+    // earlier translate+scale flip turned them upside down.
+    let bounds = CGRect::new(CGPoint::ZERO, CGSize::new(f64::from(size), f64::from(size)));
+    CGContext::draw_image(Some(&context), bounds, Some(&cg_image));
+    drop(context);
+    Some(buffer)
 }

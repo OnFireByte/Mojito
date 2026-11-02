@@ -3,7 +3,6 @@
 //! Main thread only: every method is called from the AppKit event loop.
 
 use std::collections::HashMap;
-use std::ffi::c_void;
 use std::ptr::NonNull;
 use std::sync::{Arc, Mutex};
 
@@ -12,7 +11,10 @@ use objc2::MainThreadMarker;
 use objc2::rc::Retained;
 use objc2::runtime::{NSObjectProtocol, ProtocolObject};
 use objc2_app_kit::{NSApplicationActivationPolicy, NSRunningApplication, NSWorkspace};
-use objc2_core_foundation::{CFArray, CFDictionary, CFNumber, CFString};
+use objc2_core_foundation::{
+    CFArray, CFDictionary, CFNumber, CFRetained, CFString, CFType, ConcreteType,
+};
+use objc2_core_graphics::{CGWindowListCopyWindowInfo, CGWindowListOption};
 use objc2_foundation::{NSNotification, NSString};
 
 use mojito_core::bridge::{AppIndex, AppSlot};
@@ -21,16 +23,20 @@ type Observer = Retained<ProtocolObject<dyn NSObjectProtocol>>;
 
 /// `kCGWindowLayer` for normal windows.
 const LAYER_NORMAL: i64 = 0;
+const ALL_SPACE_KINDS: i32 = 0b111;
 
+// SAFETY: private SkyLight SPI, signatures as used by every window manager
+// that calls it: the connection id is a plain integer, and
+// CGSCopySpacesForWindows returns a +1 CFArray (or null).
 #[link(name = "CoreGraphics", kind = "framework")]
 unsafe extern "C" {
-    fn CGWindowListCopyWindowInfo(option: u32, window_id: u32) -> *const c_void;
-    fn CFRelease(value: *const c_void);
-    fn CGSMainConnectionID() -> i32;
-    fn CGSCopySpacesForWindows(connection: i32, mask: i32, windows: &CFArray) -> *const c_void;
+    safe fn CGSMainConnectionID() -> i32;
+    fn CGSCopySpacesForWindows(
+        connection: i32,
+        mask: i32,
+        windows: &CFArray,
+    ) -> Option<NonNull<CFArray>>;
 }
-
-const ALL_SPACE_KINDS: i32 = 0b111;
 
 pub struct AppIndexHandle {
     current: Arc<ArcSwap<AppIndex>>,
@@ -78,7 +84,7 @@ impl AppIndexHandle {
         publish(&self.current, &self.ring);
 
         let center = NSWorkspace::sharedWorkspace().notificationCenter();
-        // SAFETY: reading the notification-name extern statics.
+        // SAFETY: reading immutable NSString constants exported by AppKit.
         let notifications = unsafe {
             [
                 (
@@ -99,12 +105,14 @@ impl AppIndexHandle {
             let ring = Arc::clone(&self.ring);
             let current = Arc::clone(&self.current);
             let block = block2::RcBlock::new(move |note: NonNull<NSNotification>| {
-                // SAFETY: the center hands a valid notification to the block.
+                // SAFETY: the center hands the block a notification that
+                // stays alive for the duration of the call.
                 let note = unsafe { note.as_ref() };
                 observe(&current, &ring, kind, note);
             });
-            // SAFETY: the block runs on the main thread and stays registered
-            // (and alive) for the process lifetime via `observers`.
+            // SAFETY: a nil queue delivers on the posting (main) thread, and
+            // the observer token is kept in `observers` for the process
+            // lifetime, so the block is never called after it is freed.
             let observer = unsafe {
                 center.addObserverForName_object_queue_usingBlock(Some(name), None, None, &block)
             };
@@ -123,11 +131,6 @@ impl AppIndexHandle {
             return;
         }
         let counts = window_counts();
-        eprintln!(
-            "mojito: ring {} apps, {} with windows", // TEMP diagnosis
-            self.ring.lock().unwrap_or_else(|e| e.into_inner()).len(),
-            counts.values().filter(|c| **c > 0).count()
-        );
         {
             let mut ring = self.ring.lock().unwrap_or_else(|error| error.into_inner());
             for slot in ring.iter_mut() {
@@ -226,185 +229,85 @@ fn observe(
 fn observed_app(note: &NSNotification) -> Option<Retained<NSRunningApplication>> {
     let info = note.userInfo()?;
     let object = info.objectForKey(&*NSString::from_str("NSWorkspaceApplicationKey"))?;
-    // SAFETY: NSWorkspace puts an NSRunningApplication under this key.
-    Some(unsafe { Retained::cast_unchecked::<NSRunningApplication>(object) })
+    object.downcast::<NSRunningApplication>().ok()
 }
 
-/// `kCGWindowListOptionAll` (0) plus `kCGWindowListExcludeDesktopElements`
-/// (1 << 4): windows on every Space, desktop and wallpaper excluded. An
-/// on-screen-only count saw one app when the user was in a fullscreen
-/// Space, which emptied the live list.
-const ALL_SPACES: u32 = 0 | (1 << 4);
+pub(crate) struct WindowInfo {
+    pub(crate) pid: Option<i64>,
+    pub(crate) number: Option<i64>,
+    pub(crate) layer: Option<i64>,
+    pub(crate) alpha: Option<f64>,
+    pub(crate) owner_name: Option<String>,
+}
+
+pub(crate) fn window_infos(option: CGWindowListOption) -> Option<Vec<WindowInfo>> {
+    let list = CGWindowListCopyWindowInfo(option, 0)?;
+    // SAFETY: every element of a CFArray is a CFType; each one is
+    // type-checked with `downcast` before use.
+    let list = unsafe { CFRetained::cast_unchecked::<CFArray<CFType>>(list) };
+    let infos = list
+        .iter()
+        .filter_map(|entry| entry.downcast::<CFDictionary>().ok())
+        .map(|dict| {
+            // SAFETY: window info dictionaries are keyed by CFStrings; lookups
+            // only hash and compare keys, and every value is type-checked.
+            let dict =
+                unsafe { CFRetained::cast_unchecked::<CFDictionary<CFString, CFType>>(dict) };
+            let number = |key| dict_value::<CFNumber>(&dict, key);
+            WindowInfo {
+                pid: number("kCGWindowOwnerPID").and_then(|n| n.as_i64()),
+                number: number("kCGWindowNumber").and_then(|n| n.as_i64()),
+                layer: number("kCGWindowLayer").and_then(|n| n.as_i64()),
+                alpha: number("kCGWindowAlpha").and_then(|n| n.as_f64()),
+                owner_name: dict_value::<CFString>(&dict, "kCGWindowOwnerName")
+                    .map(|name| name.to_string()),
+            }
+        })
+        .collect();
+    Some(infos)
+}
+
+fn dict_value<T: ConcreteType>(
+    dict: &CFDictionary<CFString, CFType>,
+    key: &'static str,
+) -> Option<CFRetained<T>> {
+    dict.get(&CFString::from_static_str(key))?
+        .downcast::<T>()
+        .ok()
+}
 
 /// Layer-0 window counts keyed by owning pid. Minimized windows still
 /// count (their app is switchable); windows on other Spaces count too.
+/// Listing every Space, desktop and wallpaper excluded: an on-screen-only
+/// count saw one app when the user was in a fullscreen Space, which
+/// emptied the live list.
 fn window_counts() -> HashMap<i32, u8> {
     let mut counts = HashMap::new();
-    let connection = unsafe { CGSMainConnectionID() };
-    // SAFETY: CoreGraphics returns a +1 CFArray of CFDictionary window info.
-    let list = unsafe { CGWindowListCopyWindowInfo(ALL_SPACES, 0) };
-    if list.is_null() {
-        return counts;
-    }
-    // SAFETY: the array lives until the release below and holds dictionaries.
-    let array = unsafe { &*(list as *const CFArray<CFDictionary>) };
-    for index in 0..array.len() as isize {
-        // SAFETY: the index is in bounds and the array is not mutated.
-        let dict = unsafe { array.get_unchecked(index) };
-        if dict_number(dict, "kCGWindowLayer") != Some(LAYER_NORMAL) {
+    let option = CGWindowListOption::OptionAll | CGWindowListOption::ExcludeDesktopElements;
+    let connection = CGSMainConnectionID();
+    for window in window_infos(option).unwrap_or_default() {
+        if window.layer != Some(LAYER_NORMAL) || window.alpha == Some(0.0) {
             continue;
         }
-        if dict_cf_number(dict, "kCGWindowAlpha").and_then(CFNumber::as_f64) == Some(0.0) {
-            continue;
-        }
-        let Some(pid) = dict_number(dict, "kCGWindowOwnerPID") else {
-            continue;
-        };
-        let Some(id) = dict_number(dict, "kCGWindowNumber") else {
+        let (Some(pid), Some(id)) = (window.pid, window.number) else {
             continue;
         };
         if !is_on_a_space(connection, id) {
             continue;
         }
         let count = counts.entry(pid as i32).or_insert(0_u8);
-        *count = (*count).saturating_add(1);
+        *count = count.saturating_add(1);
     }
-    // SAFETY: the list was retained by the copy call above.
-    unsafe { CFRelease(list) };
     counts
 }
 
 fn is_on_a_space(connection: i32, window_id: i64) -> bool {
     let windows = CFArray::from_retained_objects(&[CFNumber::new_i64(window_id)]);
-    let spaces =
-        unsafe { CGSCopySpacesForWindows(connection, ALL_SPACE_KINDS, windows.as_opaque()) };
-    if spaces.is_null() {
-        return false;
-    }
-    let count = unsafe { &*(spaces as *const CFArray) }.len();
-    unsafe { CFRelease(spaces) };
-    count > 0
-}
-
-fn dict_number(dict: &CFDictionary, key: &str) -> Option<i64> {
-    dict_cf_number(dict, key).and_then(CFNumber::as_i64)
-}
-
-fn dict_cf_number<'a>(dict: &'a CFDictionary, key: &str) -> Option<&'a CFNumber> {
-    // SAFETY: the dictionary is alive and its values are CF objects.
-    let key = CFString::from_str(key);
-    let value = unsafe { dict.value(&*key as *const CFString as *const c_void) };
-    if value.is_null() {
-        return None;
-    }
-    // SAFETY: the window info values read here are CFNumbers.
-    Some(unsafe { &*(value as *const CFNumber) })
-}
-
-/// Debug: every event tap installed on the system, with its pid, tap point,
-/// and mask, so a tap that eats keys before ours can be named.
-/// `CGGetEventTapList`.
-pub fn debug_taps() {
-    const MAX: usize = 64;
-    /// Mirrors `CGEventTapInformation` (CoreGraphics CGEventTypes.h); the
-    /// field order is ABI.
-    #[repr(C)]
-    #[derive(Clone, Copy)]
-    struct TapInfo {
-        event_tap_id: u32,
-        tap_point: u32,
-        options: u32,
-        event_mask: u64,
-        tapping_process: i32,
-        process_being_tapped: i32,
-        enabled: u8,
-        min_latency: f32,
-        avg_latency: f32,
-        max_latency: f32,
-    }
-    #[link(name = "CoreGraphics", kind = "framework")]
-    unsafe extern "C" {
-        fn CGGetEventTapList(max_taps: u32, taps: *mut TapInfo, count: *mut u32) -> i32;
-    }
-    let points = ["HID", "session", "annotated session"];
-    // SAFETY: the array is filled by CoreGraphics up to `count`.
-    unsafe {
-        let mut taps = [std::mem::zeroed::<TapInfo>(); MAX];
-        let mut count: u32 = 0;
-        if CGGetEventTapList(MAX as u32, taps.as_mut_ptr(), &mut count) != 0 {
-            println!("CGGetEventTapList failed");
-            return;
-        }
-        for tap in &taps[..count.min(MAX as u32) as usize] {
-            let owner = if tap.tapping_process == 0 {
-                "kernel".to_string()
-            } else {
-                process_name(tap.tapping_process)
-            };
-            let point = points.get(tap.tap_point as usize).copied().unwrap_or("?");
-            let kind = if tap.options == 0 { "filter" } else { "listen" };
-            println!(
-                "pid {} ({}) {} {} mask {:#x} enabled {}",
-                tap.tapping_process, owner, point, kind, tap.event_mask, tap.enabled
-            );
-        }
-    }
-}
-
-/// The process name for a pid via libproc; "(unknown)" when it is gone.
-fn process_name(pid: i32) -> String {
-    // libproc_name lives in libSystem, which is always auto-linked.
-    unsafe extern "C" {
-        fn proc_name(pid: i32, buffer: *mut c_void, size: u32) -> isize;
-    }
-    let mut buffer = [0_u8; 128];
-    // SAFETY: the buffer outlives the call.
-    let length = unsafe { proc_name(pid, buffer.as_mut_ptr().cast(), buffer.len() as u32) };
-    if length <= 0 {
-        return "(unknown)".into();
-    }
-    String::from_utf8_lossy(&buffer[..length as usize]).into_owned()
-}
-pub fn debug_windows() {
-    // SAFETY: CoreGraphics returns a +1 CFArray of CFDictionary window info.
-    let list = unsafe { CGWindowListCopyWindowInfo(0, 0) };
-    if list.is_null() {
-        println!("no window list");
-        return;
-    }
-    // SAFETY: the array lives until the release below and holds dictionaries.
-    let array = unsafe { &*(list as *const CFArray<CFDictionary>) };
-    let mut printed = 0;
-    for index in 0..array.len() as isize {
-        // SAFETY: the index is in bounds and the array is not mutated.
-        let dict = unsafe { array.get_unchecked(index) };
-        let Some(owner) = dict_string(dict, "kCGWindowOwnerName") else {
-            continue;
-        };
-        let layer = dict_number(dict, "kCGWindowLayer").unwrap_or(0);
-        // Status-level windows (the overlay) or our own process only.
-        if owner.to_lowercase().contains("moji") == false && layer < 20 {
-            continue;
-        }
-        let number = dict_number(dict, "kCGWindowNumber").unwrap_or(0);
-        let alpha = dict_number(dict, "kCGWindowAlpha").unwrap_or(-1);
-        println!("owner {owner:?} window {number} layer {layer} alpha {alpha}");
-        printed += 1;
-    }
-    if printed == 0 {
-        println!("no mojito windows on screen");
-    }
-    // SAFETY: the list was retained by the copy call above.
-    unsafe { CFRelease(list) };
-}
-
-fn dict_string(dict: &CFDictionary, key: &str) -> Option<String> {
-    // SAFETY: the dictionary is alive and its values are CF objects.
-    let key = CFString::from_str(key);
-    let value = unsafe { dict.value(&*key as *const CFString as *const c_void) };
-    if value.is_null() {
-        return None;
-    }
-    // SAFETY: kCGWindowOwnerName values are CFStrings.
-    Some(unsafe { &*(value as *const CFString) }.to_string())
+    // SAFETY: `windows` is a live CFArray of CFNumber window ids, and the
+    // returned +1 array is adopted exactly once.
+    let spaces = unsafe {
+        CGSCopySpacesForWindows(connection, ALL_SPACE_KINDS, windows.as_opaque())
+            .map(|raw| CFRetained::from_raw(raw))
+    };
+    spaces.is_some_and(|spaces| !spaces.is_empty())
 }

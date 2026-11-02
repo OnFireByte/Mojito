@@ -5,7 +5,6 @@
 mod app_spec;
 mod catalog;
 mod keysym;
-mod login;
 mod ui_settings;
 mod ui_switcher;
 
@@ -15,7 +14,7 @@ use std::sync::mpsc;
 use std::time::Duration;
 
 use arc_swap::ArcSwap;
-use mojito_core::geom::{self, DisplayInfo, Rect};
+use mojito_core::geom::{self, Rect};
 use mojito_core::{AppIndex, Config, ConfigStore, Engine, Job, UiMsg};
 use mojito_macos::caps::CapsMap;
 use mojito_macos::index::AppIndexHandle;
@@ -35,63 +34,9 @@ fn main() {
     // Debug verbs run headless in this same bundle so they carry the app's
     // TCC grants; everything else starts the GUI.
     let mut args = std::env::args().skip(1);
-    match args.next().as_deref() {
-        Some("switch") => {
-            if let Some(bundle) = args.next() {
-                mojito_macos::switch::debug_switch(&bundle);
-                return;
-            }
-            eprintln!("usage: mojito switch <bundle-id>");
-            return;
-        }
-        Some("key") => {
-            let (code, down) = match (args.next(), args.next()) {
-                (Some(code), Some(dir)) => (
-                    u16::from_str_radix(code.trim_start_matches("0x"), 16).unwrap_or(0),
-                    dir == "down",
-                ),
-                _ => {
-                    eprintln!("usage: mojito key <hex-code> <down|up>");
-                    return;
-                }
-            };
-            mojito_macos::synth::post_raw(code, down);
-            // The window server routes a posted event through the HID taps
-            // asynchronously; exiting this process immediately races the
-            // delivery and can drop the event.
-            std::thread::sleep(std::time::Duration::from_millis(60));
-            return;
-        }
-        Some("settings") => {
-            ui_settings::run_child();
-            return;
-        }
-        Some("windows") => {
-            mojito_macos::index::debug_windows();
-            return;
-        }
-        Some("sources") => {
-            for source in tis::enabled() {
-                println!("{}\t{}", source.id, source.name);
-            }
-            match tis::current_id() {
-                Ok(id) => println!("current\t{id}"),
-                Err(error) => eprintln!("mojito: {error}"),
-            }
-            for name in tis::system_history_names() {
-                println!("history\t{name}");
-            }
-            return;
-        }
-        Some("taps") => {
-            mojito_macos::index::debug_taps();
-            return;
-        }
-        Some(other) => {
-            eprintln!("unknown verb {other}; verbs: switch, key, windows");
-            return;
-        }
-        None => {}
+    if let Some(verb) = args.next() {
+        run_verb(&verb, args);
+        return;
     }
     warn_unbundled();
     // The native Metal backend skips the wgpu/naga code pages entirely,
@@ -112,34 +57,11 @@ fn main() {
     let (menu_tx, menu_rx) = mpsc::sync_channel::<status_item::MenuAction>(8);
 
     rune::run_windows_with(RunOptions { accessory: true }, move |displays| {
-        let displays: Vec<Display> = displays
-            .iter()
-            .map(|d| {
-                let b = d.native_bounds();
-                Display {
-                    id: d.id.clone(),
-                    info: DisplayInfo {
-                        bounds: Rect {
-                            x: b[0],
-                            y: b[1],
-                            w: b[2],
-                            h: b[3],
-                        },
-                        scale: d.scale,
-                    },
-                }
-            })
-            .collect();
+        let displays = map_displays(displays);
 
         let mut app = App::new(app_spec::hub_spec()).windowless().keep_running();
         let hub = app.handle();
         let switcher = app.overlay(ui_switcher::spec(), Switcher::default());
-        // Click-to-cancel needs the overlay's own handle inside its state; the
-        // view closures cannot capture it any other way.
-        switcher.update({
-            let handle = switcher.clone();
-            move |s, _| s.me = Some(handle)
-        });
 
         index.start();
         layout::snapshot();
@@ -154,25 +76,17 @@ fn main() {
         }
         pump_menu(menu_rx, hub.clone());
 
-        match start_taps(
-            store.handle(),
-            index.handle(),
-            ui_tx.clone(),
-            jobs_tx.clone(),
-            &hub,
-        ) {
-            Ok(()) => {}
-            Err(error) => {
-                eprintln!("mojito: taps: {error}");
-                // The grant can land while we run; go live the moment it does.
-                arm_permission_wait(
-                    store.handle(),
-                    index.handle(),
-                    ui_tx.clone(),
-                    jobs_tx.clone(),
-                    hub.clone(),
-                );
-            }
+        let wiring = TapWiring {
+            config: store.handle(),
+            index: index.handle(),
+            ui_tx,
+            jobs_tx,
+            hub,
+        };
+        if let Err(error) = start_taps(wiring.clone()) {
+            eprintln!("mojito: taps: {error}");
+            // The grant can land while we run; go live the moment it does.
+            arm_permission_wait(wiring);
         }
 
         let app = app.init(move || Hub {
@@ -188,6 +102,58 @@ fn main() {
         // so the hub keeps a real (hidden) window despite being windowless.
         vec![WindowSpec::from_app("hub", app)]
     });
+}
+
+fn run_verb(verb: &str, mut args: impl Iterator<Item = String>) {
+    match verb {
+        "switch" => match args.next() {
+            Some(bundle) => mojito_macos::switch::debug_switch(&bundle),
+            None => eprintln!("usage: mojito switch <bundle-id>"),
+        },
+        "key" => {
+            let (Some(code), Some(dir)) = (args.next(), args.next()) else {
+                eprintln!("usage: mojito key <hex-code> <down|up>");
+                return;
+            };
+            let code = u16::from_str_radix(code.trim_start_matches("0x"), 16).unwrap_or(0);
+            mojito_macos::synth::post_raw(code, dir == "down");
+            // The window server routes a posted event through the HID taps
+            // asynchronously; exiting this process immediately races the
+            // delivery and can drop the event.
+            std::thread::sleep(Duration::from_millis(60));
+        }
+        "settings" => ui_settings::run_child(),
+        "windows" => mojito_macos::diagnostics::windows(),
+        "sources" => {
+            for source in tis::enabled() {
+                println!("{}\t{}", source.id, source.name);
+            }
+            match tis::current_id() {
+                Ok(id) => println!("current\t{id}"),
+                Err(error) => eprintln!("mojito: {error}"),
+            }
+            for name in tis::system_history_names() {
+                println!("history\t{name}");
+            }
+        }
+        "taps" => mojito_macos::diagnostics::taps(),
+        other => {
+            eprintln!("unknown verb {other}; verbs: switch, key, settings, windows, sources, taps")
+        }
+    }
+}
+
+fn map_displays(displays: &[rune::Display]) -> Vec<Display> {
+    displays
+        .iter()
+        .map(|d| {
+            let [x, y, w, h] = d.native_bounds();
+            Display {
+                id: d.id.clone(),
+                bounds: Rect { x, y, w, h },
+            }
+        })
+        .collect()
 }
 
 /// What the main thread's pump needs to reach. Everything arrives from
@@ -222,7 +188,7 @@ impl Hub {
 
 struct Display {
     id: Option<DisplayId>,
-    info: DisplayInfo,
+    bounds: Rect,
 }
 
 impl Default for Hub {
@@ -267,7 +233,6 @@ fn hub_poll(s: &mut Hub, _: f64, _: &mut Tx) -> bool {
                 reveal(&overlay, s, ui_switcher::Mode::Pinned, rows);
             }
             UiMsg::ShowLive { rows } => {
-                eprintln!("mojito: live rows: {}", rows.len()); // TEMP diagnosis
                 let rows = rows
                     .iter()
                     .map(|r| {
@@ -283,10 +248,7 @@ fn hub_poll(s: &mut Hub, _: f64, _: &mut Tx) -> bool {
                 reveal(&overlay, s, ui_switcher::Mode::Live, rows);
             }
             UiMsg::Hide => overlay.hide(),
-            UiMsg::HideFade => {
-                eprintln!("mojito: HideFade received");
-                overlay.fade_out(Duration::from_millis(120))
-            }
+            UiMsg::HideFade => overlay.fade_out(Duration::from_millis(120)),
         }
     }
     let (Some(store), Some(index)) = (s.store.as_ref(), s.index.as_ref()) else {
@@ -357,9 +319,9 @@ fn placement(s: &Hub, size: (f32, f32)) -> (Option<DisplayTarget>, Rect) {
             },
         );
     }
-    let infos: Vec<DisplayInfo> = s.displays.iter().map(|d| d.info.clone()).collect();
-    let at = geom::display_containing(cursor::location(), &infos);
-    let bounds = infos[at].bounds;
+    let bounds: Vec<Rect> = s.displays.iter().map(|d| d.bounds).collect();
+    let at = geom::display_containing(cursor::location(), &bounds);
+    let bounds = bounds[at];
     let global = geom::centered_rect((f64::from(size.0), f64::from(size.1)), bounds);
     let local = Rect {
         x: global.x - bounds.x,
@@ -391,7 +353,7 @@ fn pump_menu(rx: mpsc::Receiver<status_item::MenuAction>, hub: AppHandle<Hub>) {
                             eprintln!("mojito: settings process: {spawn_error}");
                         }
                     }
-                    status_item::MenuAction::ToggleLogin => login::toggle(),
+                    status_item::MenuAction::ToggleLogin => mojito_macos::login::toggle(),
                     status_item::MenuAction::RestoreCaps => {
                         if let Err(error) = CapsMap.uninstall() {
                             eprintln!("mojito: caps restore: {error}");
@@ -409,27 +371,33 @@ fn pump_menu(rx: mpsc::Receiver<status_item::MenuAction>, hub: AppHandle<Hub>) {
         .expect("spawn menu pump");
 }
 
-/// Build a fresh engine and spawn the tap thread. Called at startup and
-/// again by the permission waiter; each attempt owns its own engine, so a
-/// failed start leaves nothing behind.
-fn start_taps(
-    store: Arc<ArcSwap<Config>>,
+#[derive(Clone)]
+struct TapWiring {
+    config: Arc<ArcSwap<Config>>,
     index: Arc<ArcSwap<AppIndex>>,
     ui_tx: mpsc::SyncSender<UiMsg>,
     jobs_tx: mpsc::SyncSender<Job>,
-    hub: &AppHandle<Hub>,
-) -> Result<(), String> {
-    let engine = Engine::new(store, index, ui_tx.clone(), jobs_tx.clone());
+    hub: AppHandle<Hub>,
+}
+
+/// Build a fresh engine and spawn the tap thread. Called at startup and
+/// again by the permission waiter; each attempt owns its own engine, so a
+/// failed start leaves nothing behind.
+fn start_taps(wiring: TapWiring) -> Result<(), String> {
+    let TapWiring {
+        config,
+        index,
+        ui_tx,
+        jobs_tx,
+        hub,
+    } = wiring;
     let ui_wake: Box<dyn Fn() + Send> = {
         let hub = hub.clone();
         Box::new(move || hub.wake())
     };
-    let job_wake: Box<dyn Fn() + Send> = {
-        let hub = hub.clone();
-        Box::new(move || hub.wake())
-    };
+    let job_wake: Box<dyn Fn() + Send> = Box::new(move || hub.wake());
     taps::spawn(taps::TapDeps {
-        engine,
+        engine: Engine::new(config, index),
         ui: ui_tx,
         jobs: jobs_tx,
         ui_wake,
@@ -440,13 +408,7 @@ fn start_taps(
 /// Poll for the Accessibility grant and bring the engine live the moment it
 /// lands. The thread exits after one successful spawn, so it costs nothing
 /// once granted.
-fn arm_permission_wait(
-    store: Arc<ArcSwap<Config>>,
-    index: Arc<ArcSwap<AppIndex>>,
-    ui_tx: mpsc::SyncSender<UiMsg>,
-    jobs_tx: mpsc::SyncSender<Job>,
-    hub: AppHandle<Hub>,
-) {
+fn arm_permission_wait(wiring: TapWiring) {
     std::thread::Builder::new()
         .name("mojito-permwait".into())
         .spawn(move || {
@@ -461,7 +423,7 @@ fn arm_permission_wait(
                     status_item::set_needs_attention(true);
                 }
             }
-            if let Err(error) = start_taps(store, index, ui_tx, jobs_tx, &hub) {
+            if let Err(error) = start_taps(wiring) {
                 eprintln!("mojito: taps after grant: {error}");
             }
         })

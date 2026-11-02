@@ -32,7 +32,8 @@ pub struct RawKey {
 }
 
 /// A synthesized key event. Down and up are explicit; `flags` carries the
-/// triggering event's real modifier flags so meta+shift+h yields shift+Left.
+/// triggering event's real modifier flags so meta+cmd+shift+h yields
+/// cmd+shift+Left.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct SynthKey {
     pub key: PhysicalKey,
@@ -68,12 +69,13 @@ enum Phase {
     },
     /// The switcher is visible and survives meta release: while it shows,
     /// every bare key is ours. F18 may be up or down under this phase.
-    /// `rearm` is a second meta press over the open overlay: a bare release
-    /// (no key used) dismisses the overlay, a used one keeps it.
+    /// `rearm` is a second meta press over the open overlay, holding whether
+    /// a key was used under it: a bare release dismisses the overlay, a used
+    /// one keeps it.
     Overlay {
         overlay: OverlayPhase,
         committed: bool,
-        rearm: Option<(Mono, bool)>,
+        rearm: Option<bool>,
     },
 }
 
@@ -103,8 +105,8 @@ enum Layer {
     Live(Arc<[LiveRow]>),
 }
 
-/// Flags that turn a key into a system chord: such keys pass through a hold
-/// untouched (cmd+tab survives meta), never route.
+/// Flags that turn an unbound key into a system chord: such keys pass through
+/// a hold untouched (cmd+tab survives meta).
 const CHORD: ModifierFlags =
     ModifierFlags(ModifierFlags::CMD.0 | ModifierFlags::CTRL.0 | ModifierFlags::OPT.0);
 
@@ -124,24 +126,13 @@ pub struct Engine {
     /// event; a duplicate identity must not act twice.
     last: Option<(PhysicalKey, bool, Mono, bool)>,
     memory: LabelMemory,
-    // The engine's output crosses to the UI and main thread inside the
-    // returned `Vec<Action>`; the tap callback routes Ui/Job variants over
-    // these channels itself, so the engine never sends on them.
-    #[allow(dead_code)]
-    ui: std::sync::mpsc::SyncSender<UiMsg>,
-    #[allow(dead_code)]
-    jobs: std::sync::mpsc::SyncSender<Job>,
 }
 
 impl Engine {
     /// Build the engine. `config` and `index` are shared lock-free snapshots;
-    /// the senders are the only crossings to the UI and main thread.
-    pub fn new(
-        config: Arc<ArcSwap<Config>>,
-        index: Arc<ArcSwap<crate::bridge::AppIndex>>,
-        ui: std::sync::mpsc::SyncSender<UiMsg>,
-        jobs: std::sync::mpsc::SyncSender<Job>,
-    ) -> Self {
+    /// the engine's output crosses to the UI and main thread only inside the
+    /// returned `Vec<Action>`, which the tap callback routes.
+    pub fn new(config: Arc<ArcSwap<Config>>, index: Arc<ArcSwap<crate::bridge::AppIndex>>) -> Self {
         let config_snapshot = config.load_full();
         let tables = build_tables(&config_snapshot);
         let tables_version = config_snapshot.version;
@@ -156,8 +147,6 @@ impl Engine {
             route: [Route::Undecided; 256],
             last: None,
             memory,
-            ui,
-            jobs,
         }
     }
 
@@ -166,9 +155,10 @@ impl Engine {
     ///   hidutil remap guarantees macOS never sees a Caps Lock event).
     /// - Any key event during the hold, including passed modifier chords,
     ///   marks the press used, which kills the Esc-on-release.
-    /// - Keys with CMD/CTRL/OPT flags pass through untouched; their down
-    ///   route is remembered so the up passes too.
-    /// - SHIFT-only chords are honored on routed keys.
+    /// - Synthesized keys (h/j/k/l, i) carry every modifier, so meta+cmd+h
+    ///   is cmd+Left.
+    /// - Other keys with CMD/CTRL/OPT flags pass through untouched; their
+    ///   down route is remembered so the up passes too.
     /// - Autorepeat of a routed key re-synthesizes.
     /// - Any reset returns to Idle, clears routes, and hides the overlay.
     /// - An event identical to the previous one (same key, direction, and
@@ -177,11 +167,13 @@ impl Engine {
     ///   delivery may act.
     pub fn on_event(&mut self, ev: RawKey) -> Vec<Action> {
         self.refresh_tables();
-        if let Some((key, down, t, passed)) = self.last {
-            if key == ev.key && down == ev.down && t == ev.t {
-                // The other tap already decided this exact event.
-                return if passed { vec![Action::Pass] } else { vec![Action::Swallow] };
-            }
+        if let Some((key, down, t, passed)) = self.last
+            && key == ev.key
+            && down == ev.down
+            && t == ev.t
+        {
+            // The other tap already decided this exact event.
+            return if passed { vec![Action::Pass] } else { vec![Action::Swallow] };
         }
         let actions = self.decide(ev);
         let passed = !matches!(actions.first(), Some(Action::Swallow));
@@ -198,10 +190,6 @@ impl Engine {
         if ix >= self.route.len() {
             return vec![Action::Pass]; // outside the routable key space: stay transparent
         }
-        let committed = matches!(
-            &self.phase,
-            Phase::Held { committed: true } | Phase::Overlay { committed: true, .. }
-        );
         let actions = if ev.down && !ev.repeat {
             match &self.phase {
                 Phase::Idle => {
@@ -211,15 +199,14 @@ impl Engine {
                 _ => self.decide_down(ev, ix),
             }
         } else if ev.down {
-            self.obey_repeat(ev, ix, committed)
+            self.obey_repeat(ev, ix)
         } else {
-            self.decide_up(ev, ix, committed)
+            self.decide_up(ev, ix)
         };
         match &mut self.phase {
-            Phase::Armed { used, .. } => *used = true,
-            Phase::Overlay {
-                rearm: Some((_, used)),
-                ..
+            Phase::Armed { used, .. }
+            | Phase::Overlay {
+                rearm: Some(used), ..
             } => *used = true,
             _ => {}
         }
@@ -240,12 +227,7 @@ impl Engine {
     /// calls this. No-op unless an uncommitted overlay is open.
     pub fn cancel_overlay(&mut self) -> Vec<Action> {
         if matches!(self.phase, Phase::Overlay { committed: false, .. }) {
-            self.phase = if self.meta_down {
-                Phase::Held { committed: false }
-            } else {
-                Phase::Idle
-            };
-            vec![Action::Ui(UiMsg::HideFade)]
+            self.cancel_state()
         } else {
             vec![]
         }
@@ -277,9 +259,7 @@ impl Engine {
                 // A second meta press over the open overlay arms the
                 // bare-release dismissal.
                 Phase::Overlay { rearm, .. } => {
-                    if rearm.is_none() {
-                        *rearm = Some((ev.t, false));
-                    }
+                    rearm.get_or_insert(false);
                 }
             }
             self.meta_down = true;
@@ -308,7 +288,7 @@ impl Engine {
             Phase::Held { .. } => {}
             // A bare release of the second meta press dismisses the sticky
             // overlay; a release after using keys keeps it open.
-            Phase::Overlay { rearm: Some((_, used)), .. } => dismiss = !*used,
+            Phase::Overlay { rearm: Some(used), .. } => dismiss = !*used,
             Phase::Overlay { rearm: None, .. } => {}
         }
         if dismiss {
@@ -330,6 +310,13 @@ impl Engine {
         }
     }
 
+    fn synthesizes(&self, ix: usize) -> bool {
+        matches!(
+            self.phase,
+            Phase::Armed { .. } | Phase::Held { committed: false }
+        ) && matches!(self.tables.hidden.get(ix), Some(Some(Chord::Synth(_))))
+    }
+
     /// A committed hold is inert until F18 releases.
     fn committed(&self) -> bool {
         match &self.phase {
@@ -339,99 +326,74 @@ impl Engine {
     }
 
     /// A fresh (non-repeat) down during a hold. Chords pass and mark used;
-    /// everything else routes through the layer's table.
+    /// everything else routes through the layer's table, and a live label
+    /// outranks the pinned table.
     fn decide_down(&mut self, ev: RawKey, ix: usize) -> Vec<Action> {
-        if ev.flags.intersects(CHORD) {
+        if ev.flags.intersects(CHORD) && !self.synthesizes(ix) {
             self.route[ix] = Route::Pass;
             return vec![Action::Pass];
         }
+        self.route[ix] = Route::Swallow;
         if self.committed() {
-            self.route[ix] = Route::Swallow;
             return vec![Action::Swallow];
         }
-        match self.layer() {
-            Layer::Hidden => match self.tables.hidden.get(ix).copied().flatten() {
-                Some(Chord::Synth(sk)) => {
-                    self.route[ix] = Route::Synth(sk.key);
-                    self.phase = Phase::Held { committed: false };
-                    vec![
-                        Action::Swallow,
-                        Action::Synth(SynthKey {
-                            key: sk.key,
-                            down: true,
-                            flags: ev.flags.keep_only_shift(),
-                        }),
-                    ]
-                }
-                Some(Chord::ToggleInput) => {
-                    self.route[ix] = Route::Swallow;
-                    self.phase = Phase::Held { committed: false };
-                    vec![Action::Swallow, Action::Job(Job::ToggleInputSource)]
-                }
-                Some(Chord::OpenPinned) => {
-                    self.route[ix] = Route::Swallow;
-                    self.enter_pinned()
-                }
-                _ => {
-                    self.route[ix] = Route::Swallow;
-                    vec![Action::Swallow]
-                }
-            },
-            Layer::Pinned => match self.tables.pinned.get(ix).copied().flatten() {
-                Some(Chord::TriggerPin(pin)) => {
-                    let config = self.config.load_full();
-                    match config.pinned.get(pin as usize) {
-                        Some(app) => self.commit(ix, AppRef::Bundle(app.bundle_id.clone())),
-                        None => {
-                            self.route[ix] = Route::Swallow;
-                            vec![Action::Swallow]
-                        }
-                    }
-                }
-                Some(Chord::ToggleMode) => {
-                    self.route[ix] = Route::Swallow;
-                    self.enter_live()
-                }
-                Some(Chord::Cancel) => self.cancel(ix),
-                _ => {
-                    self.route[ix] = Route::Swallow;
-                    vec![Action::Swallow]
-                }
-            },
-            Layer::Live(rows) => {
-                let hit = rows
-                    .iter()
-                    .find(|row| row.label == Some(ev.key))
-                    .map(|row| row.pid);
-                if let Some(pid) = hit {
-                    self.commit(ix, AppRef::Pid(pid))
-                } else {
-                    match self.tables.pinned.get(ix).copied().flatten() {
-                        Some(Chord::ToggleMode) => {
-                            self.route[ix] = Route::Swallow;
-                            self.enter_pinned()
-                        }
-                        Some(Chord::Cancel) => self.cancel(ix),
-                        _ => {
-                            self.route[ix] = Route::Swallow;
-                            vec![Action::Swallow]
-                        }
-                    }
+        let layer = self.layer();
+        if let Layer::Live(rows) = &layer
+            && let Some(row) = rows.iter().find(|row| row.label == Some(ev.key))
+        {
+            return self.commit(AppRef::Pid(row.pid));
+        }
+        let table = match layer {
+            Layer::Hidden => &self.tables.hidden,
+            Layer::Pinned | Layer::Live(_) => &self.tables.pinned,
+        };
+        match (table.get(ix).copied().flatten(), layer) {
+            (Some(Chord::Synth(key)), _) => {
+                self.route[ix] = Route::Synth(key);
+                self.phase = Phase::Held { committed: false };
+                vec![
+                    Action::Swallow,
+                    Action::Synth(SynthKey {
+                        key,
+                        down: true,
+                        flags: ev.flags.keep_modifiers(),
+                    }),
+                ]
+            }
+            (Some(Chord::ToggleInput), _) => {
+                self.phase = Phase::Held { committed: false };
+                vec![Action::Swallow, Action::Job(Job::ToggleInputSource)]
+            }
+            (Some(Chord::OpenPinned), _) | (Some(Chord::ToggleMode), Layer::Live(_)) => {
+                self.enter_pinned()
+            }
+            (Some(Chord::ToggleMode), Layer::Pinned) => self.enter_live(),
+            (Some(Chord::TriggerPin(pin)), Layer::Pinned) => {
+                let config = self.config.load_full();
+                match config.pinned.get(pin as usize) {
+                    Some(app) => self.commit(AppRef::Bundle(app.bundle_id.clone())),
+                    None => vec![Action::Swallow],
                 }
             }
+            (Some(Chord::Cancel), _) => {
+                let mut actions = self.cancel_state();
+                actions.insert(0, Action::Swallow);
+                actions
+            }
+            _ => vec![Action::Swallow],
         }
     }
 
     /// An autorepeat follows its down's decision, whatever the phase now is.
-    fn obey_repeat(&mut self, ev: RawKey, ix: usize, committed: bool) -> Vec<Action> {
+    fn obey_repeat(&mut self, ev: RawKey, ix: usize) -> Vec<Action> {
         match self.route[ix] {
             Route::Pass => vec![Action::Pass],
-            Route::Synth(key) if !committed => vec![
+            Route::Synth(key) if !self.committed() => vec![
                 Action::Swallow,
                 Action::Synth(SynthKey {
                     key,
                     down: true,
-                    flags: ev.flags.keep_only_shift(),
+                    flags: ev.flags.keep_modifiers(),
                 }),
             ],
             Route::Swallow | Route::Synth(_) => vec![Action::Swallow],
@@ -450,17 +412,17 @@ impl Engine {
 
     /// An up obeys its down's decision: passed keys pass, synthesized keys
     /// close with a matching up, swallowed keys stay silent.
-    fn decide_up(&mut self, ev: RawKey, ix: usize, committed: bool) -> Vec<Action> {
+    fn decide_up(&mut self, ev: RawKey, ix: usize) -> Vec<Action> {
         let route = self.route[ix];
         self.route[ix] = Route::Undecided;
         match route {
             Route::Pass => vec![Action::Pass],
-            Route::Synth(key) if !committed => vec![
+            Route::Synth(key) if !self.committed() => vec![
                 Action::Swallow,
                 Action::Synth(SynthKey {
                     key,
                     down: false,
-                    flags: ev.flags.keep_only_shift(),
+                    flags: ev.flags.keep_modifiers(),
                 }),
             ],
             Route::Swallow | Route::Synth(_) => vec![Action::Swallow],
@@ -471,35 +433,27 @@ impl Engine {
         }
     }
 
-    fn cancel(&mut self, ix: usize) -> Vec<Action> {
-        self.route[ix] = Route::Swallow;
-        let mut actions = self.cancel_state();
-        actions.insert(0, Action::Swallow);
-        actions
-    }
-
     /// Where commit and cancel land depends on whether meta is still held:
     /// a held F18 keeps the chord layer alive (inert when committed), a
     /// released F18 returns the machine to transparent Idle.
-    fn cancel_state(&mut self) -> Vec<Action> {
+    fn land(&mut self, committed: bool) {
         self.phase = if self.meta_down {
-            Phase::Held { committed: false }
+            Phase::Held { committed }
         } else {
             Phase::Idle
         };
+    }
+
+    fn cancel_state(&mut self) -> Vec<Action> {
+        self.land(false);
         vec![Action::Ui(UiMsg::HideFade)]
     }
 
     /// Commit = hide instantly, switch on the main thread, and make the rest
     /// of the hold inert so leftover autorepeats never type into the app we
     /// just landed on.
-    fn commit(&mut self, ix: usize, app: AppRef) -> Vec<Action> {
-        self.route[ix] = Route::Swallow;
-        self.phase = if self.meta_down {
-            Phase::Held { committed: true }
-        } else {
-            Phase::Idle
-        };
+    fn commit(&mut self, app: AppRef) -> Vec<Action> {
+        self.land(true);
         vec![
             Action::Swallow,
             Action::Ui(UiMsg::Hide),

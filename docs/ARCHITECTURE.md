@@ -128,18 +128,19 @@ The whole domain is two 128-slot tables built by one pure function; no runtime b
 ```rust
 pub struct Tables { hidden: [Option<Chord>; 128], pinned: [Option<Chord>; 128] }
 pub enum Chord {
-    Synth(SynthKey),     // arrows/backspace; flags ride along
+    Synth(PhysicalKey),  // arrows/backspace; flags ride along
     ToggleInput,         // fresh presses only, autorepeat ignored
     OpenPinned,          // meta+e
     ToggleMode,          // e again, both directions
     TriggerPin(u16),     // index into Config::pinned
-    Label(u8),           // index into LiveModel rows
     Cancel,              // esc inside the overlay
 }
 // hidden[m]: h/j/k/l -> Synth(arrows), i -> Synth(backspace), enter -> ToggleInput,
 //            e -> OpenPinned, everything else None (pass iff flags has
 //            CMD/CTRL/OPT, else swallow).
 // pinned[m]: user trigger keys -> TriggerPin, e -> ToggleMode, esc -> Cancel.
+// Live labels are not a chord: the engine matches the key against the frozen
+// LiveModel rows before consulting the pinned table.
 //            Labels are never in pinned[m]; live labels come from LiveModel.
 ```
 
@@ -158,11 +159,11 @@ Label priority encodes the Colemak-DH ergonomics (grounded against colemakmods.g
 ```rust
 /// QWERTY-position virtual keycodes, best reach first. First ten = the
 /// Colemak-DH "ten easiest keys" (home row outer eight + bottom index curl).
-pub const LABEL_PRIORITY: [PhysicalKey; 27] = [
+pub const LABEL_PRIORITY: [PhysicalKey; 26] = [
     /* home L index->pinky */ F, D, S, A,
     /* home R index->pinky */ J, K, L, SEMICOLON,
     /* bottom index curl   */ V, M,
-    /* top strong          */ T, Y, E, U, R, I,
+    /* top strong          */ T, Y, U, R, I,
     /* home center (demoted)*/ G, H,
     /* bottom neighbors    */ B, N,
     /* bottom left         */ C, X, Z,
@@ -170,12 +171,12 @@ pub const LABEL_PRIORITY: [PhysicalKey; 27] = [
 ];
 ```
 
-Assignment is deterministic and injective: walk `LABEL_PRIORITY`, skipping every key in `RESERVED` and every user-pinned trigger key; hand keys to rows in NSWorkspace recency order; then apply sticky memory (an app keeps its last label when that key is free this activation). Rows beyond the pool render unlabeled and are unreachable by key (rare; more than ~24 open apps).
+Assignment is deterministic and injective: walk `LABEL_PRIORITY`, which holds no `RESERVED` key, skipping every user-pinned trigger key; hand keys to rows in NSWorkspace recency order; then apply sticky memory (an app keeps its last label when that key is free this activation). Rows beyond the pool render unlabeled and are unreachable by key (rare; more than ~24 open apps).
 
 ```rust
 /// Keys no label or pin may ever take. Enforced in config validation AND in
 /// label assignment; single source of truth.
-pub const RESERVED: [PhysicalKey; 4] = [F18, ESC, RETURN, M];
+pub const RESERVED: [PhysicalKey; 4] = [F18, ESC, RETURN, E];
 pub struct LabelMemory(BTreeMap<String /*bundle_id*/, PhysicalKey>);
 pub fn assign_labels(rows: &[AppSlot], memory: &LabelMemory, pinned: &[PhysicalKey])
     -> Vec<LiveRow>;
@@ -267,7 +268,7 @@ Commit = `Ui(Hide)` + `Job(Switch)` + `committed = true` while meta is held, or 
 Pure, `cargo test`, any OS (all in `mojito-core`):
 - Engine golden sequences: tap -> exactly one Esc (down+up); hold+h -> Left down; held h autorepeat -> repeated Left downs, one up at release; meta+shift+h -> shift+Left; meta+enter -> ToggleInput once; meta+e -> ShowPinned; e again -> ShowLive; e again -> Pinned; label -> commit + committed-inert leftovers; release -> Hide; esc -> HideFade; cmd+tab during hold -> Pass and marks used; unbound bare key -> swallow; F18 up stale (> tap_max_ms) -> no Esc; F18 up after a passed chord -> no Esc; route memory: every up obeys its down's decision, including after release; injected Reset from any state -> Idle + Hide; duplicate event (same key, direction, timestamp) repeats the decision with no side effects.
 - Tables: hidden table equals the const spec; pinned table trigger keys win; duplicate trigger keys never yield two TriggerPins; reserved keys never yield chords.
-- Labels: determinism, injectivity, RESERVED skipped (m never assigned), pinned keys skipped, sticky memory honored when free and skipped when taken, priority tier membership pinned, overflow -> unlabeled.
+- Labels: determinism, injectivity, RESERVED skipped (e never assigned), pinned keys skipped, sticky memory honored when free and skipped when taken, priority tier membership pinned, overflow -> unlabeled.
 - Keycode spaces: golden test asserts `F18 = 0x4F`, `F18_USAGE = 0x7000006D`, and that the two constants differ (the trap that killed all three arena candidates).
 - Config: every recovery rule; duplicate keys first-wins; reserved keys rejected; round-trip.
 - Placement math: display containing a point across scaled and negative-origin displays; centered rect clamped to visible frame.

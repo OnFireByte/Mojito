@@ -125,7 +125,9 @@ fn flush_later(
     }
     let mut next = (*current.load_full()).clone();
     next.label_memory.0.extend(patch.0);
-    let _ = persist(&path, &current, &writer, next);
+    if let Err(error) = persist(&path, &current, &writer, next) {
+        eprintln!("mojito: label memory write to {}: {error}", path.display());
+    }
 }
 
 fn persist(

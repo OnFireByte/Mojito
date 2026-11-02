@@ -27,21 +27,16 @@ impl ModifierFlags {
     pub const OPT: Self = Self(1 << 19);
     pub const CMD: Self = Self(1 << 20);
 
-    pub fn is_empty(self) -> bool {
-        self.0 == 0
-    }
-
     pub fn intersects(self, other: Self) -> bool {
         self.0 & other.0 != 0
     }
 
-    pub fn keep_only_shift(self) -> Self {
-        Self(self.0 & Self::SHIFT.0)
+    pub fn keep_modifiers(self) -> Self {
+        Self(self.0 & (Self::SHIFT.0 | Self::CTRL.0 | Self::OPT.0 | Self::CMD.0))
     }
 }
 
 /// Virtual keycodes verified against the SDK's HIToolbox/Events.h.
-pub const CAPS: PhysicalKey = PhysicalKey(0x39);
 pub const F18: PhysicalKey = PhysicalKey(0x4F);
 pub const ESC: PhysicalKey = PhysicalKey(0x35);
 pub const RETURN: PhysicalKey = PhysicalKey(0x24);
@@ -152,13 +147,11 @@ mod tests {
     #[test]
     fn keycode_spaces_are_distinct_and_golden() {
         assert_eq!(F18, PhysicalKey(0x4F));
-        assert_eq!(CAPS, PhysicalKey(0x39));
         assert_eq!(F18_USAGE, HidUsage(0x7_0000_006D));
         assert_eq!(CAPS_USAGE, HidUsage(0x7_0000_0039));
         assert_eq!(F18_USAGE.0, 30064771181);
         assert_eq!(CAPS_USAGE.0, 30064771129);
         assert_ne!(F18.0 as u64, F18_USAGE.0);
-        assert_ne!(CAPS.0 as u64, CAPS_USAGE.0);
     }
 
     #[test]

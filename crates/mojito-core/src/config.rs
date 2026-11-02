@@ -42,7 +42,8 @@ pub struct Warning(pub String);
 
 /// Parse settings JSON with hex's recovery rules: unknown keys ignored; an
 /// invalid field defaults in memory with a warning; duplicate trigger keys
-/// resolve first-wins with a warning; reserved keys rejected with a warning.
+/// resolve first-wins with a warning; reserved and out-of-range keys rejected
+/// with a warning.
 /// Never fails hard: a corrupt file yields defaults and warnings. Empty input
 /// is a fresh install, not corruption.
 pub fn parse(bytes: &[u8]) -> (Config, Vec<Warning>) {
@@ -113,10 +114,8 @@ pub fn parse(bytes: &[u8]) -> (Config, Vec<Warning>) {
                         )));
                         continue;
                     };
-                    if crate::labels::RESERVED.contains(&key) {
-                        warnings.push(Warning(format!(
-                            "pinned[{i}]: key {key:?} is reserved; skipped"
-                        )));
+                    if let Some(reason) = unbindable(key) {
+                        warnings.push(Warning(format!("pinned[{i}]: key {key:?} {reason}; skipped")));
                         continue;
                     }
                     if !seen.insert(key) {
@@ -171,8 +170,18 @@ fn key_from_json(value: &serde_json::Value) -> Option<PhysicalKey> {
     u16::from_str_radix(digits, 16).ok().map(PhysicalKey)
 }
 
+fn unbindable(key: PhysicalKey) -> Option<&'static str> {
+    if crate::labels::RESERVED.contains(&key) {
+        Some("is reserved")
+    } else if usize::from(key.0) >= crate::tables::TABLE_SLOTS {
+        Some("is outside the bindable key range")
+    } else {
+        None
+    }
+}
+
 /// Boundary validation for a draft from the settings UI: duplicate keys
-/// first-wins, reserved keys rejected, name and bundle required. The returned
+/// first-wins, reserved and out-of-range keys rejected, name and bundle required. The returned
 /// config is the validated draft (dropped entries removed), warnings explain
 /// every drop.
 pub fn validate(draft: Config) -> (Config, Vec<Warning>) {
@@ -186,9 +195,9 @@ pub fn validate(draft: Config) -> (Config, Vec<Warning>) {
             )));
             continue;
         }
-        if crate::labels::RESERVED.contains(&app.key) {
+        if let Some(reason) = unbindable(app.key) {
             warnings.push(Warning(format!(
-                "pinned[{i}]: key {:?} is reserved; skipped",
+                "pinned[{i}]: key {:?} {reason}; skipped",
                 app.key
             )));
             continue;

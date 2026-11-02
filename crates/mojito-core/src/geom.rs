@@ -10,25 +10,18 @@ pub struct Rect {
     pub h: f64,
 }
 
-#[derive(Clone, Debug)]
-pub struct DisplayInfo {
-    /// Global-space bounds of the display.
-    pub bounds: Rect,
-    pub scale: f64,
-}
-
-/// The display containing the point, or the primary when none contains it.
-/// Bounds arrive in points from the backend (already scale-resolved), so a
-/// scaled display needs no extra math here — only its rect. An empty slice
-/// yields 0; callers with no displays never place an overlay.
-pub fn display_containing(point: (f64, f64), displays: &[DisplayInfo]) -> usize {
-    for (i, d) in displays.iter().enumerate() {
-        let b = &d.bounds;
-        if point.0 >= b.x && point.0 < b.x + b.w && point.1 >= b.y && point.1 < b.y + b.h {
-            return i;
-        }
-    }
-    0
+/// The index of the display whose global-space bounds contain the point, or
+/// the primary when none contains it. Bounds arrive in points from the
+/// backend (already scale-resolved), so a scaled display needs no extra math
+/// here. An empty slice yields 0; callers with no displays never place an
+/// overlay.
+pub fn display_containing(point: (f64, f64), displays: &[Rect]) -> usize {
+    displays
+        .iter()
+        .position(|b| {
+            point.0 >= b.x && point.0 < b.x + b.w && point.1 >= b.y && point.1 < b.y + b.h
+        })
+        .unwrap_or(0)
 }
 
 /// Center a card of `size` inside `bounds`, clamped so it stays visible.
@@ -53,33 +46,23 @@ pub fn centered_rect(size: (f64, f64), bounds: Rect) -> Rect {
 mod tests {
     use super::*;
 
-    fn primary() -> DisplayInfo {
-        DisplayInfo {
-            bounds: Rect {
-                x: 0.0,
-                y: 0.0,
-                w: 1440.0,
-                h: 900.0,
-            },
-            scale: 1.0,
-        }
-    }
+    const PRIMARY: Rect = Rect {
+        x: 0.0,
+        y: 0.0,
+        w: 1440.0,
+        h: 900.0,
+    };
 
-    fn scaled_negative_left() -> DisplayInfo {
-        DisplayInfo {
-            bounds: Rect {
-                x: -1440.0,
-                y: 0.0,
-                w: 1440.0,
-                h: 900.0,
-            },
-            scale: 2.0,
-        }
-    }
+    const NEGATIVE_LEFT: Rect = Rect {
+        x: -1440.0,
+        y: 0.0,
+        w: 1440.0,
+        h: 900.0,
+    };
 
     #[test]
     fn containing_finds_display_across_negative_origin() {
-        let displays = [primary(), scaled_negative_left()];
+        let displays = [PRIMARY, NEGATIVE_LEFT];
         assert_eq!(display_containing((720.0, 450.0), &displays), 0);
         assert_eq!(display_containing((-100.0, 100.0), &displays), 1);
         // Right edges are exclusive; exactly at 0 belongs to the left display.
@@ -89,27 +72,24 @@ mod tests {
 
     #[test]
     fn containing_falls_back_to_primary_outside_all() {
-        let displays = [primary(), scaled_negative_left()];
+        let displays = [PRIMARY, NEGATIVE_LEFT];
         assert_eq!(display_containing((5000.0, 500.0), &displays), 0);
         assert_eq!(display_containing((600.0, 2000.0), &displays), 0);
         assert_eq!(display_containing((600.0, 500.0), &[]), 0);
     }
 
     #[test]
-    fn containing_ignores_scale_bounds_are_points() {
-        // A scaled display's bounds are already in points: a point in its
-        // right half must match, not be halved by the scale factor.
-        let displays = [DisplayInfo {
-            bounds: Rect {
-                x: 0.0,
-                y: 0.0,
-                w: 720.0,
-                h: 450.0,
-            },
-            scale: 2.0,
-        }];
-        assert_eq!(display_containing((700.0, 400.0), &displays), 0);
-        assert_eq!(display_containing((730.0, 400.0), &displays), 0); // fallback
+    fn containing_matches_points_inside_a_smaller_secondary() {
+        let secondary = Rect {
+            x: 1440.0,
+            y: 0.0,
+            w: 720.0,
+            h: 450.0,
+        };
+        let displays = [PRIMARY, secondary];
+        assert_eq!(display_containing((2140.0, 400.0), &displays), 1);
+        assert_eq!(display_containing((2170.0, 400.0), &displays), 0);
+        assert_eq!(display_containing((2140.0, 460.0), &displays), 0);
     }
 
     #[test]
