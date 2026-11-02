@@ -443,7 +443,7 @@ fn capture_input(s: &mut SettingsState, row: usize, ev: &PhysicalInput) -> bool 
             match keysym::physical(*key) {
                 Some(pk) if RESERVED.contains(&pk) => {
                     s.status = Some(Status {
-                        text: "That key is reserved (meta, esc, return, m)".to_string(),
+                        text: "That key is reserved (meta, esc, return, e)".to_string(),
                         error: true,
                     });
                 }

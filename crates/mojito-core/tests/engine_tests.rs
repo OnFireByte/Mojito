@@ -14,7 +14,7 @@ const J: u16 = 0x26;
 const TAB: u16 = 0x30;
 const Q: u16 = 0x0C;
 const F: u16 = 0x03;
-const M: u16 = 0x2E;
+const SWITCHER: u16 = 0x0E;
 const RET: u16 = 0x24;
 const ESC: u16 = 0x35;
 const F18: u16 = 0x4F;
@@ -275,7 +275,7 @@ fn meta_enter_toggles_input_once_and_ignores_autorepeat() {
 fn meta_m_shows_pinned_rows_and_requests_window_counts() {
     let mut engine = standard_rig();
     engine.on_event(key(F18, true, 0));
-    let actions = engine.on_event(key(M, true, 10));
+    let actions = engine.on_event(key(SWITCHER, true, 10));
     assert_eq!(actions[0], Action::Swallow);
     match ui(&actions[1]) {
         Some(UiMsg::ShowPinned { rows }) => {
@@ -292,9 +292,9 @@ fn meta_m_shows_pinned_rows_and_requests_window_counts() {
 fn m_toggles_pinned_live_pinned() {
     let mut engine = standard_rig();
     engine.on_event(key(F18, true, 0));
-    let pinned = engine.on_event(key(M, true, 10));
+    let pinned = engine.on_event(key(SWITCHER, true, 10));
     assert!(matches!(ui(&pinned[1]), Some(UiMsg::ShowPinned { .. })));
-    let live = engine.on_event(key(M, true, 20));
+    let live = engine.on_event(key(SWITCHER, true, 20));
     match ui(&live[1]) {
         Some(UiMsg::ShowLive { rows }) => {
             // Frontmost excluded (none here), windowless excluded, recency
@@ -307,7 +307,7 @@ fn m_toggles_pinned_live_pinned() {
         }
         other => panic!("expected ShowLive, got {other:?}"),
     }
-    let back = engine.on_event(key(M, true, 30));
+    let back = engine.on_event(key(SWITCHER, true, 30));
     assert!(matches!(ui(&back[1]), Some(UiMsg::ShowPinned { .. })));
 }
 
@@ -315,8 +315,8 @@ fn m_toggles_pinned_live_pinned() {
 fn label_press_commits_and_leftovers_are_inert() {
     let mut engine = standard_rig();
     engine.on_event(key(F18, true, 0));
-    engine.on_event(key(M, true, 10)); // Pinned
-    engine.on_event(key(M, true, 20)); // Live; Mail (pid 42) owns f
+    engine.on_event(key(SWITCHER, true, 10)); // Pinned
+    engine.on_event(key(SWITCHER, true, 20)); // Live; Mail (pid 42) owns f
     let commit = engine.on_event(key(F, true, 30));
     assert_eq!(commit[0], Action::Swallow);
     assert_eq!(ui(&commit[1]), Some(&UiMsg::Hide));
@@ -340,7 +340,7 @@ fn label_press_commits_and_leftovers_are_inert() {
 fn pin_trigger_commits_a_bundle_switch() {
     let mut engine = standard_rig();
     engine.on_event(key(F18, true, 0));
-    engine.on_event(key(M, true, 10));
+    engine.on_event(key(SWITCHER, true, 10));
     let commit = engine.on_event(key(TRIGGER, true, 20));
     assert_eq!(ui(&commit[1]), Some(&UiMsg::Hide));
     assert_eq!(
@@ -364,11 +364,11 @@ fn pin_trigger_commits_a_bundle_switch() {
 fn release_leaves_the_overlay_open_and_bare_keys_still_select() {
     let mut engine = standard_rig();
     engine.on_event(key(F18, true, 0));
-    engine.on_event(key(M, true, 10));
+    engine.on_event(key(SWITCHER, true, 10));
     // Releasing meta keeps the switcher: no Hide, no Esc.
     assert_eq!(engine.on_event(key(F18, false, 100)), vec![Action::Swallow]);
-    // A bare m toggles to the live list, then a bare label key selects.
-    engine.on_event(key(M, true, 105));
+    // A bare e toggles to the live list, then a bare label key selects.
+    engine.on_event(key(SWITCHER, true, 105));
     let commit = engine.on_event(key(LABEL_FIRST, true, 110));
     assert_eq!(commit[0], Action::Swallow);
     assert_eq!(ui(&commit[1]), Some(&UiMsg::Hide));
@@ -382,7 +382,7 @@ fn release_leaves_the_overlay_open_and_bare_keys_still_select() {
 fn sticky_overlay_esc_closes_and_unbound_keys_are_swallowed() {
     let mut engine = standard_rig();
     engine.on_event(key(F18, true, 0));
-    engine.on_event(key(M, true, 10));
+    engine.on_event(key(SWITCHER, true, 10));
     engine.on_event(key(F18, false, 20));
     // An unbound bare key does nothing but is still ours.
     assert_eq!(engine.on_event(key(0x2C, true, 30)), vec![Action::Swallow]);
@@ -398,11 +398,11 @@ fn sticky_overlay_esc_closes_and_unbound_keys_are_swallowed() {
 fn sticky_overlay_toggles_modes_without_meta() {
     let mut engine = standard_rig();
     engine.on_event(key(F18, true, 0));
-    engine.on_event(key(M, true, 10));
+    engine.on_event(key(SWITCHER, true, 10));
     engine.on_event(key(F18, false, 20));
-    let toggle = engine.on_event(key(M, true, 30));
+    let toggle = engine.on_event(key(SWITCHER, true, 30));
     assert!(matches!(ui(&toggle[1]), Some(UiMsg::ShowLive { .. })));
-    let back = engine.on_event(key(M, true, 40));
+    let back = engine.on_event(key(SWITCHER, true, 40));
     assert!(matches!(ui(&back[1]), Some(UiMsg::ShowPinned { .. })));
 }
 
@@ -410,7 +410,7 @@ fn sticky_overlay_toggles_modes_without_meta() {
 fn commit_without_meta_returns_to_idle() {
     let mut engine = standard_rig();
     engine.on_event(key(F18, true, 0));
-    engine.on_event(key(M, true, 10));
+    engine.on_event(key(SWITCHER, true, 10));
     engine.on_event(key(F18, false, 20));
     let commit = engine.on_event(key(TRIGGER, true, 30));
     assert_eq!(ui(&commit[1]), Some(&UiMsg::Hide));
@@ -423,7 +423,7 @@ fn commit_without_meta_returns_to_idle() {
 fn commit_with_meta_held_stays_inert_until_release() {
     let mut engine = standard_rig();
     engine.on_event(key(F18, true, 0));
-    engine.on_event(key(M, true, 10));
+    engine.on_event(key(SWITCHER, true, 10));
     let commit = engine.on_event(key(TRIGGER, true, 20));
     assert_eq!(ui(&commit[1]), Some(&UiMsg::Hide));
     // The rest of the hold is inert: no re-trigger, no typing.
@@ -439,7 +439,7 @@ fn cancel_overlay_control_only_reaches_an_open_overlay() {
     // Nothing open: the control path is a no-op.
     assert_eq!(engine.cancel_overlay(), vec![]);
     engine.on_event(key(F18, true, 0));
-    engine.on_event(key(M, true, 10));
+    engine.on_event(key(SWITCHER, true, 10));
     // Meta still held: cancel lands back on the chord layer.
     let cancel = engine.cancel_overlay();
     assert_eq!(cancel, vec![Action::Ui(UiMsg::HideFade)]);
@@ -451,7 +451,7 @@ fn cancel_overlay_control_only_reaches_an_open_overlay() {
 fn cmd_chord_passes_during_sticky_overlay_too() {
     let mut engine = standard_rig();
     engine.on_event(key(F18, true, 0));
-    engine.on_event(key(M, true, 10));
+    engine.on_event(key(SWITCHER, true, 10));
     engine.on_event(key(F18, false, 20));
     let down = engine.on_event(flagged(TAB, true, 30, ModifierFlags::CMD));
     assert_eq!(down, vec![Action::Pass]);
@@ -465,16 +465,16 @@ fn cmd_chord_passes_during_sticky_overlay_too() {
 fn esc_cancels_with_a_fade_and_the_hold_survives() {
     let mut engine = standard_rig();
     engine.on_event(key(F18, true, 0));
-    engine.on_event(key(M, true, 10));
+    engine.on_event(key(SWITCHER, true, 10));
     let cancel = engine.on_event(key(ESC, true, 20));
     assert_eq!(cancel, vec![Action::Swallow, Action::Ui(UiMsg::HideFade)]);
     // Cancel returns to the hidden-meta layer: esc itself was swallowed,
-    // release hides nothing (already hidden), and m reopens the overlay.
+    // release hides nothing (already hidden), and e reopens the overlay.
     assert_eq!(engine.on_event(key(ESC, false, 25)), vec![Action::Swallow]);
     assert_eq!(engine.on_event(key(F18, false, 30)), vec![Action::Swallow]);
     let reopen = {
         engine.on_event(key(F18, true, 40));
-        engine.on_event(key(M, true, 50))
+        engine.on_event(key(SWITCHER, true, 50))
     };
     assert!(matches!(ui(&reopen[1]), Some(UiMsg::ShowPinned { .. })));
 }
@@ -588,7 +588,7 @@ fn empty_pin_list_boots_straight_to_live() {
         }],
     );
     engine.on_event(key(F18, true, 0));
-    let open = engine.on_event(key(M, true, 10));
+    let open = engine.on_event(key(SWITCHER, true, 10));
     assert!(matches!(ui(&open[1]), Some(UiMsg::ShowLive { .. })));
 }
 
@@ -621,7 +621,7 @@ fn frontmost_and_windowless_apps_never_appear_in_live() {
         ],
     );
     engine.on_event(key(F18, true, 0));
-    let open = engine.on_event(key(M, true, 10));
+    let open = engine.on_event(key(SWITCHER, true, 10));
     match ui(&open[1]) {
         Some(UiMsg::ShowLive { rows }) => {
             assert_eq!(rows.len(), 1);
@@ -647,7 +647,7 @@ fn reset_from_any_state_returns_to_idle_and_hides() {
     // From Pinned overlay.
     let mut engine = standard_rig();
     engine.on_event(key(F18, true, 0));
-    engine.on_event(key(M, true, 10));
+    engine.on_event(key(SWITCHER, true, 10));
     assert_eq!(engine.reset(), vec![Action::Ui(UiMsg::Hide)]);
     assert_eq!(engine.on_event(key(F18, false, 20)), vec![Action::Swallow]); // no Esc, no Hide
     assert_eq!(engine.on_event(key(Q, true, 30)), vec![Action::Pass]);
@@ -673,7 +673,7 @@ fn settings_save_rebuilds_tables_on_the_next_gesture() {
         version: 1,
         ..Default::default()
     }));
-    let open = engine.on_event(key(M, true, 10));
+    let open = engine.on_event(key(SWITCHER, true, 10));
     match ui(&open[1]) {
         Some(UiMsg::ShowPinned { rows }) => {
             assert_eq!(rows[0].name, "Terminal");
@@ -704,12 +704,12 @@ fn duplicate_events_repeat_the_decision_without_side_effects() {
     assert_eq!(engine.on_event(a), vec![Action::Pass]);
     assert_eq!(engine.on_event(key(0x00, false, 1_100)), vec![Action::Pass]);
 
-    // A hold that opens the overlay: the duplicated m-down must not open it
+    // A hold that opens the overlay: the duplicated e-down must not open it
     // twice (a second decision here would toggle straight to the live list).
     assert_eq!(engine.on_event(key(F18, true, 2_000)), vec![Action::Swallow]);
-    let open = engine.on_event(key(M, true, 2_050));
+    let open = engine.on_event(key(SWITCHER, true, 2_050));
     assert!(matches!(ui(&open[1]), Some(UiMsg::ShowPinned { .. })));
-    assert_eq!(engine.on_event(key(M, true, 2_050)), vec![Action::Swallow]);
+    assert_eq!(engine.on_event(key(SWITCHER, true, 2_050)), vec![Action::Swallow]);
 
     // The sticky overlay survives meta release; the duplicated Esc-down must
     // not fade twice.
@@ -741,7 +741,7 @@ fn duplicate_events_repeat_the_decision_without_side_effects() {
 fn tapping_caps_again_dismisses_the_open_overlay() {
     let mut engine = standard_rig();
     engine.on_event(key(F18, true, 0));
-    engine.on_event(key(M, true, 50)); // ShowPinned
+    engine.on_event(key(SWITCHER, true, 50)); // ShowPinned
     engine.on_event(key(F18, false, 100)); // sticky overlay
 
     // The second caps press and release: fade, then Idle.
@@ -769,11 +769,11 @@ fn tapping_caps_again_dismisses_the_open_overlay() {
 fn using_a_key_during_the_second_hold_keeps_the_overlay() {
     let mut engine = standard_rig();
     engine.on_event(key(F18, true, 0));
-    engine.on_event(key(M, true, 50));
+    engine.on_event(key(SWITCHER, true, 50));
     engine.on_event(key(F18, false, 100));
 
     assert_eq!(engine.on_event(key(F18, true, 5_000)), vec![Action::Swallow]);
-    let toggle = engine.on_event(key(M, true, 5_050)); // m -> live list
+    let toggle = engine.on_event(key(SWITCHER, true, 5_050)); // e -> live list
     assert!(matches!(ui(&toggle[1]), Some(UiMsg::ShowLive { .. })));
     assert_eq!(engine.on_event(key(F18, false, 5_200)), vec![Action::Swallow]);
     // Still in the overlay: Esc cancels with the fade.

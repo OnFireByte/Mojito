@@ -13,17 +13,17 @@ A **tap** of Caps Lock sends `Escape`. **Holding** it turns Caps Lock into a Met
 | Meta + `H` / `J` / `K` / `L` | Arrow keys |
 | Meta + `I` | Backspace |
 | Meta + `Enter` | Cycle between your two most recent input sources |
-| Meta + `M` | Open the app-switching overlay |
+| Meta + `E` | Open the app-switching overlay |
 
 Shortcuts are matched by **physical key position**, so they stay consistent no matter what keyboard layout or input language is active.
 
 ## App switching
 
-Meta + `M` opens an overlay for switching apps:
+Meta + `E` opens an overlay for switching apps:
 
 - Configure which apps appear in the overlay via Mojito's settings.
 - Each app is selected with an assigned label key.
-- Pressing `M` again while holding Meta + `M` switches to a live list of currently open apps, each auto-assigned a label key. The layout prioritizes easy-to-reach keys, inspired by the Colemak-DH layout.
+- Pressing `E` again while holding Meta + `E` switches to a live list of currently open apps, each auto-assigned a label key. The layout prioritizes easy-to-reach keys, inspired by the Colemak-DH layout.
 
 Switching brings the correct window into focus, even across workspaces.
 

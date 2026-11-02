@@ -46,7 +46,7 @@ pub const RESERVED: [PhysicalKey; 4] = [
     PhysicalKey(0x4F), // F18: the meta key itself
     PhysicalKey(0x35), // esc: cancel
     PhysicalKey(0x24), // return: reserved for a future confirm
-    PhysicalKey(0x2E), // m: the mode toggle
+    PhysicalKey(0x0E), // e: the switcher and mode toggle
 ];
 
 /// Sticky label memory: an app keeps its last label when that key is free
@@ -57,8 +57,8 @@ pub struct LabelMemory(pub std::collections::BTreeMap<String, PhysicalKey>);
 /// Assign labels to rows in the given (recency) order. Walk LABEL_PRIORITY
 /// skipping RESERVED and pinned trigger keys; grant a sticky remembered label
 /// first when free; rows beyond the pool get no label. Returns one entry per
-/// input row, in order. Note: the `m` position in LABEL_PRIORITY is always
-/// skipped because `m` is reserved for the mode toggle, so the effective pool
+/// input row, in order. Note: the `e` position in LABEL_PRIORITY is always
+/// skipped because `e` is reserved for the mode toggle, so the effective pool
 /// is 26 keys.
 pub fn assign_labels(
     rows: &[AppSlot],
@@ -98,7 +98,7 @@ pub fn assign_labels(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::key::{ESC, F18, M, RETURN};
+    use crate::key::{ESC, F18, SWITCHER, RETURN};
 
     fn slot(pid: i32, bundle: Option<&str>) -> AppSlot {
         AppSlot {
@@ -110,7 +110,7 @@ mod tests {
         }
     }
 
-    /// The full pool, in order, minus the reserved `m` position.
+    /// The full pool, in order, minus the reserved `e` position.
     fn pool() -> Vec<PhysicalKey> {
         LABEL_PRIORITY
             .iter()
@@ -143,7 +143,7 @@ mod tests {
         let got: Vec<PhysicalKey> = labels.iter().copied().flatten().collect();
         assert_eq!(got, expected);
         // The reserved keys never appear even with demand for every key.
-        for reserved in [F18, ESC, RETURN, M] {
+        for reserved in [F18, ESC, RETURN, SWITCHER] {
             assert!(!got.contains(&reserved));
         }
     }
@@ -188,9 +188,9 @@ mod tests {
     fn memory_pointing_at_reserved_or_pinned_keys_is_ignored() {
         let rows = [slot(1, Some("b1")), slot(2, Some("b2"))];
         let f = LABEL_PRIORITY[0];
-        let memory = LabelMemory([("b1".into(), M), ("b2".into(), f)].into_iter().collect());
+        let memory = LabelMemory([("b1".into(), SWITCHER), ("b2".into(), f)].into_iter().collect());
         let labels = assign_labels(&rows, &memory, &[f]);
-        assert_eq!(labels[0], Some(LABEL_PRIORITY[1])); // m reserved, f pinned -> d
+        assert_eq!(labels[0], Some(LABEL_PRIORITY[1])); // e reserved, f pinned -> d
         assert_eq!(labels[1], Some(LABEL_PRIORITY[2])); // f pinned again -> s
     }
 

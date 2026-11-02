@@ -208,7 +208,7 @@ pub fn validate(draft: Config) -> (Config, Vec<Warning>) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::key::{ESC, F18, M, RETURN};
+    use crate::key::{ESC, F18, SWITCHER, RETURN};
     use crate::labels::LabelMemory;
 
     fn parse_str(json: &str) -> (Config, Vec<Warning>) {
@@ -305,7 +305,7 @@ mod tests {
     #[test]
     fn reserved_keys_are_rejected_with_a_warning() {
         let json = r#"{"pinned": [
-            {"name": "m", "bundle_id": "b.m", "key": 46},
+            {"name": "e", "bundle_id": "b.e", "key": 14},
             {"name": "esc", "bundle_id": "b.esc", "key": 53},
             {"name": "ok", "bundle_id": "b.ok", "key": 3}
         ]}"#;
@@ -317,12 +317,12 @@ mod tests {
 
     #[test]
     fn label_memory_parses_and_drops_bad_entries() {
-        let json = r#"{"label_memory": {"com.a": 3, "com.b": "1E", "com.c": "zz", "com.d": 46}}"#;
+        let json = r#"{"label_memory": {"com.a": 3, "com.b": "1E", "com.c": "zz", "com.d": 14}}"#;
         let (config, warnings) = parse_str(json);
         assert_eq!(config.label_memory.0.get("com.a"), Some(&PhysicalKey(3)));
         assert_eq!(config.label_memory.0.get("com.b"), Some(&PhysicalKey(0x1E)));
         assert_eq!(config.label_memory.0.get("com.c"), None);
-        assert_eq!(config.label_memory.0.get("com.d"), None); // m is reserved
+        assert_eq!(config.label_memory.0.get("com.d"), None); // e is reserved
         assert_eq!(warnings.len(), 2);
     }
 
@@ -367,7 +367,7 @@ mod tests {
                 PinnedApp {
                     name: "res".into(),
                     bundle_id: "b.res".into(),
-                    key: M,
+                    key: SWITCHER,
                 },
                 PinnedApp {
                     name: "".into(),
@@ -390,7 +390,7 @@ mod tests {
 
     #[test]
     fn validate_rejects_every_reserved_key() {
-        for key in [F18, ESC, RETURN, M] {
+        for key in [F18, ESC, RETURN, SWITCHER] {
             let draft = Config {
                 pinned: vec![PinnedApp {
                     name: "x".into(),
