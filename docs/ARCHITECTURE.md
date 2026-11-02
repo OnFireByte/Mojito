@@ -4,18 +4,18 @@ The synthesized design for Mojito, produced by an architect arena (three candida
 
 ## Goal
 
-Mojito turns Caps Lock into the hub of machine control so the user reaches any target with fewer finger movements. Tap Caps Lock sends Esc. Holding it engages a meta layer: meta+h/j/k/l are arrow keys, meta+i is backspace, meta+enter toggles between the two most recent input languages, meta+e opens the app switcher. Bindings are physical key positions and hold under any layout or input language. The switcher lists user-pinned apps with user-assigned trigger keys; pressing e again toggles to open apps with auto-assigned easy-reach labels (Colemak-DH ergonomics). Switching changes the window, not just the app. A settings window manages pinned apps and keys. macOS 15+ first, Rust, rune UI, resource budget: about zero idle CPU and an instant overlay.
+Mojito turns Caps Lock into the hub of machine control so the user reaches any target with fewer finger movements. Tap Caps Lock sends Esc. Holding it engages a meta layer: meta+h/j/k/l are arrow keys, meta+i is backspace, meta+enter toggles between the two most recent input languages, and meta+e or Cmd+Tab opens the app switcher (the `switcher_trigger` setting picks either or both; with Cmd+Tab on, macOS's own Cmd+Tab and Cmd+Shift+Tab are turned off while Mojito runs). Bindings are physical key positions and hold under any layout or input language. The switcher lists user-pinned apps with user-assigned trigger keys; pressing e or tab toggles to open apps with auto-assigned easy-reach labels (Colemak-DH ergonomics). Switching changes the window, not just the app. A settings window manages pinned apps and keys. macOS 15+ first, Rust, an AppKit switcher and a rune settings window, resource budget: about zero idle CPU, an instant overlay, and a footprint near 10 MB idle that stays under 15 MB while the switcher shows.
 
 ## Shape in one paragraph
 
-Two threads. The tap thread owns three CGEventTaps (one filter per public tap point: HID head, session, annotated session), a health timer, and the entire decision engine, which runs inline in the tap callback as a pure state machine. The main thread runs rune (overlay panel, settings window, status item), NSWorkspace observers, and all AX/TIS/AppKit work drained from a job queue inside `AppSpec.poll`. The engine never blocks and never touches AppKit; the UI never parses a keystroke. Shared state flows one way through lock-free snapshots (`ArcSwap<Config>`, `ArcSwap<AppIndex>`), and the only engine-to-UI vocabulary is two message enums.
+Two threads. The tap thread owns three CGEventTaps (one filter per public tap point: HID head, session, annotated session), a health timer, and the entire decision engine, which runs inline in the tap callback as a pure state machine. The main thread runs a plain `NSApplication` (switcher panel, status item), NSWorkspace observers, and all AX/TIS/AppKit work drained from a job queue; the tap thread wakes it with `DispatchQueue::main().exec_async`. The settings window is rune in a separate short-lived process. The engine never blocks and never touches AppKit; the UI never parses a keystroke. Shared state flows one way through lock-free snapshots (`ArcSwap<Config>`, `ArcSwap<AppIndex>`), and the only engine-to-UI vocabulary is two message enums.
 
 ```
 tap thread                              main thread
 ┌─────────────────────────────┐   UiMsg  ┌──────────────────────────────┐
-│ HID tap (filter, head)      │ ───────► │ rune loop (poll drains jobs) │
-│ session tap (filter)        │          │  ├ switcher overlay (prewarm)│
-│ annotated-session tap (fil- │          │  ├ settings window           │
+│ HID tap (filter, head)      │ ───────► │ NSApplication (pump on wake) │
+│ session tap (filter)        │          │  ├ switcher panel (AppKit)   │
+│ annotated-session tap (fil- │          │  ├ settings (child process)  │
 │   ter, last public point)   │          │  ├ NSStatusItem              │
 │        │                    │   Job    │  ├ NSWorkspace observers ─┐  │
 │   Engine::on_event (pure)   │ ───────► │  ├ TIS / AX / activate    │  │
@@ -30,8 +30,8 @@ tap thread                              main thread
 | crate | owns | depends on |
 |---|---|---|
 | `mojito-core` | Pure domain: key newtypes, engine state machine, binding tables, label assignment, config model and JSON parsing, overlay placement math, glyph table. No macOS, no rune, no I/O. Everything here runs in `cargo test` on any OS. | serde, arc-swap |
-| `mojito-macos` | All macOS contact: taps, synthesis, hidutil remap, app index, switching, TIS, permissions, status item, layout glyphs. `cfg(target_os = "macos")`. | core, objc2, objc2-foundation, objc2-app-kit |
-| `mojito` (bin) | Wiring only: rune app assembly, UI views, the bridge from `UiMsg`/`Job` to rune handles, packaging entry. | core, macos, rune, rune-kit |
+| `mojito-macos` | All macOS contact: taps, synthesis, hidutil remap, app index, switching, TIS, permissions, status item, layout glyphs, the switcher panel, app icons. `cfg(target_os = "macos")`. | core, objc2, objc2-foundation, objc2-app-kit, objc2-quartz-core |
+| `mojito` (bin) | Wiring only: NSApplication setup, the main-thread pump from `UiMsg`/`Job` to the switcher and jobs, the rune settings window (child process), packaging entry. | core, macos, dispatch2, rune, rune-kit |
 
 Dependency direction: `mojito → {mojito-macos, mojito-core}`; `mojito-macos → mojito-core`; `mojito-core → nothing`. `UiMsg` and `Job` are the only engine/UI crossings. `ModifierFlags` is opaque in core; no CoreGraphics or AX type appears outside `mojito-macos`.
 
@@ -130,15 +130,15 @@ pub struct Tables { hidden: [Option<Chord>; 128], pinned: [Option<Chord>; 128] }
 pub enum Chord {
     Synth(PhysicalKey),  // arrows/backspace; flags ride along
     ToggleInput,         // fresh presses only, autorepeat ignored
-    OpenPinned,          // meta+e
-    ToggleMode,          // e again, both directions
+    OpenPinned,          // meta+e, when switcher_trigger allows it
+    ToggleMode,          // e or tab, both directions
     TriggerPin(u16),     // index into Config::pinned
     Cancel,              // esc inside the overlay
 }
 // hidden[m]: h/j/k/l -> Synth(arrows), i -> Synth(backspace), enter -> ToggleInput,
 //            e -> OpenPinned, everything else None (pass iff flags has
 //            CMD/CTRL/OPT, else swallow).
-// pinned[m]: user trigger keys -> TriggerPin, e -> ToggleMode, esc -> Cancel.
+// pinned[m]: user trigger keys -> TriggerPin, e and tab -> ToggleMode, esc -> Cancel.
 // Live labels are not a chord: the engine matches the key against the frozen
 // LiveModel rows before consulting the pinned table.
 //            Labels are never in pinned[m]; live labels come from LiveModel.
@@ -227,15 +227,17 @@ The whole UX in one matrix. `route[key]` makes every down decision bind its up; 
 | h/j/k/l | synth arrow (flags kept) | label or swallow | label or swallow |
 | i | synth backspace | label or swallow | label or swallow |
 | return | ToggleInput (fresh only) | label or swallow | label or swallow |
-| m | OpenPinned | ToggleMode | ToggleMode |
+| e | OpenPinned (if `switcher_trigger` allows) | ToggleMode | ToggleMode |
+| tab | swallow | ToggleMode | ToggleMode |
 | user trigger key | (unbound: swallow) | TriggerPin -> commit | n/a |
 | assigned label key | n/a | n/a | Label -> commit |
 | esc | swallow | Cancel (HideFade) | Cancel (HideFade) |
-| any key, flags CMD/CTRL/OPT | Pass (and marks used) | Pass (and marks used) | Pass (and marks used) |
+| cmd+tab (shift allowed, no ctrl/opt), if `switcher_trigger` allows | OpenPinned, Cmd owned by the overlay | ToggleMode | ToggleMode |
+| any key, flags CMD/CTRL/OPT | Pass (and marks used) | Pass, except CMD in an overlay Cmd+Tab drives | Pass, except CMD in an overlay Cmd+Tab drives |
 | any other bare key | swallow | swallow | swallow |
 | F18 up | tap within tap_max_ms and !used -> synth Esc; else nothing -> Idle | bare release of a re-press -> HideFade -> Idle; used release -> overlay stays open | overlay stays open |
 
-Commit = `Ui(Hide)` + `Job(Switch)` + `committed = true` while meta is held, or an immediate return to transparent Idle when the overlay was already sticky. Esc cancels with `HideFade`. The overlay is sticky: releasing meta leaves it open, and while it shows the engine owns every bare key; Esc, a selection, the control keycode, or a bare second caps press (F18 re-pressed and released without using a key) closes it with `HideFade` — using any key during that second hold keeps the overlay open instead. Click-to-cancel reaches the engine because the UI posts an unmarked synthetic keyDown on the reserved unassigned `CONTROL` keycode, which the tap swallows and turns into a cancel.
+Commit = `Ui(Hide)` + `Job(Switch)` + `committed = true` while meta is held, or an immediate return to transparent Idle when the overlay was already sticky. Esc cancels with `HideFade`. The overlay is sticky: releasing meta leaves it open, and while it shows the engine owns every bare key; Esc, a selection, the control keycode, or a bare second caps press (F18 re-pressed and released without using a key) closes it with `HideFade` — using any key during that second hold keeps the overlay open instead. Cmd+Tab is decided before the phase table and works from Idle too: it opens the pinned list as a sticky overlay, and pressed again flips modes; the engine cannot see Cmd's release (flagsChanged is never tapped), so a quick Cmd+Tab does not jump to the previous app the way macOS's does. `mojito-macos::native_switcher` turns the native symbolic hotkeys 1 and 2 off through `CGSSetSymbolicHotKeyEnabled` only after the taps are live, restores them on terminate, SIGINT and SIGTERM, and re-syncs on every launch and config reload. Click-to-cancel reaches the engine because the UI posts an unmarked synthetic keyDown on the reserved unassigned `CONTROL` keycode, which the tap swallows and turns into a cancel.
 
 ## macOS backend
 
@@ -246,20 +248,21 @@ Commit = `Ui(Hide)` + `Job(Switch)` + `committed = true` while meta is held, or 
 - **Switching** (`mojito-macos::switch`): every AX call under `AXUIElementSetMessagingTimeout(0.25)` so a hung app cannot stall the gesture. Ladder: resolve pid by bundle id (`NSRunningApplication` lookup, else `NSWorkspace.openApplication` then re-resolve) -> `unhide()` if hidden -> `activate()` -> pick window via AX (`kAXFocusedWindowAttribute` -> `kAXMainWindowAttribute` -> windows[0] -> none) -> `kAXRaiseAction`. AXRaise runs even when `activate()` is refused; both run unconditionally. Degradation: Accessibility denied or no raisable window -> activation-only, and the settings pane says so plainly; switching to a Space with open windows completes the move. Minimized targets: clear `kAXMinimized` before raise.
 - **Input sources** (`mojito-macos::tis`): enabled sources via `TISCreateInputSourceList(null, false)` filtered to keyboard-category and select-capable; the toggle returns to the source that was current before the most recent change (the hardware Caps Lock behavior the remap removes), with the next source in menu order standing in until history exists, via `TISSelectInputSource`, on the main thread only (overlapping TIS calls from worker threads crashed hex, release 2.1.12). The two-most-recent history is process-lifetime and observed at presses; macOS keeps no public record of it.
 - **Permissions** (`mojito-macos::permission`): `CGPreflightPostEventAccess()` (launch-frozen) + `AXIsProcessTrusted()` (live) both checked; prompt via `AXIsProcessTrustedWithOptions(kAXTrustedCheckOptionPrompt: YES)`; 250 ms poll starts the engine the moment the grant lands and stops once granted; still untrusted ~15 s after prompting offers a `tccutil` reset and re-prompt. Input Monitoring is never requested. Accessibility also grants listen-event access.
-- **Status item** (`mojito-macos::status_item`): `NSStatusItem` via objc2 (hex `macos_rune/status_item.rs:46-120` pattern), menu: Settings, Start at Login (SMAppService on a worker thread), Restore Caps Lock, About, Quit. Actions cross to the pump over a `SyncSender`.
+- **Status item** (`mojito-macos::status_item`): `NSStatusItem` via objc2 (hex `macos_rune/status_item.rs:46-120` pattern), menu: Settings, Start at Login (SMAppService on a worker thread), Restore Caps Lock, About, Quit. Actions run on the main thread through a callback passed to `install`.
 - **Layout glyphs** (`mojito-macos::layout`): one main-thread snapshot at startup of `UCKeyTranslate` over keycodes 0..128 from `TISCopyCurrentKeyboardLayoutInputSource`, refreshed on the distributed input-source-changed notification; converts `PhysicalKey` to display glyph for badges. TIS access stays behind one mutex and never re-enters from worker threads on a miss.
 
-## UI (rune, pinned rev 092dec2e40436d6835fe25ebc8a994fe67f3c9e4)
+## UI
 
-- App assembly: `rune::prewarm_gpu()` first in `main`; `run_windows_with(RunOptions { accessory: true }, ..)` with a `windowless().keep_running()` app; status item and engine started in `on_ready` so nothing the first frame needs waits on them.
-- **Switcher overlay**: one prewarmed panel via `App::overlay` (hex `rune_hud.rs:299-353` shape): `OverlayOptions { display: UnderPointer, prewarm: true, input: OverlayInput::Regions, keys: KeyPolicy::None, exclude_from_capture: true }`, `.srgb_blend(true)`. `KeyPolicy::None` is deliberate: the tap owns every keystroke, so the panel is a pure display surface and the focus-loss race class does not exist. Reveal in one `update` closure: cursor position (via `CGEventGetLocation` in `mojito-macos`) -> display containing it -> `OverlayPlacement::Rect` centered (pure math in core) -> store rows -> `tx.instant()` -> `show()`; the first visible frame already holds the rows. `OverlayInput::Regions` plus a `.hit()` backdrop gives click-to-cancel without focus.
-- Glass card per `examples/glass-panel`: `continuous_corners()`, two `Shadow::core_animation` shadows, `system_material(SystemMaterial::Glass)`, frost tint fill, hairline border; window shadow off. Rows: key badge (glyph) | app icon or monogram | name | (live) window count.
-- **Settings window**: regular window (fixed-size so tiling window managers float it), opened from the status item; activation policy flips Accessory -> Regular while open and back. Panes: pinned apps (add from installed-app catalog scan, assign trigger key, remove), behavior (tap threshold), permissions (live state, open System Settings, degraded-mode banner), remap status (installed/reinstall/restore). Trigger capture happens in the window via `.on_physical_input`: the tap engine passes bare keys through when meta is not held, so the focused settings window receives them; the recorder shows the glyph from the layout snapshot. rune-kit `ShortcutRecorder` is rejected for now: it models modifier chords, and our triggers are bare physical keys.
+- App assembly: `NSApplication` with the Accessory policy, status item and taps installed before `run()`. No rune and no Metal in the main process: on Apple GPUs the first render-command encoder in a process allocates about 92 MB of graphics footprint, which put a rune overlay at about 190 MB while shown and 30 MB after. The AppKit panel is composited by the window server and peaks near 12 MB.
+- **Switcher overlay** (`mojito-macos::switcher`): one borderless non-activating `NSPanel` at status-window level, joining all Spaces, created once and ordered out on hide. Each show rebuilds the card from rows (badge glyph | icon or monogram | name | live window count) inside an `NSGlassEffectView` (`NSVisualEffectView` HUD material before macOS 26), places it centered on the display under the pointer (pure math in `mojito_core::geom`), and orders it front without activating. It never takes keys: the tap owns every keystroke. Each row is a `RowView` that accepts the first click on the non-activating panel, highlights on hover, and on click posts the row's own key (pin trigger or live label), so the engine commits a click through the same path as the keystroke; a live row past the label pool has no key and is not clickable. A global mouse-down monitor, installed only while shown, posts the reserved control keycode so a click outside the card cancels. `HideFade` animates alpha and releases the card only if no newer show happened.
+- App icons (`mojito-macos::icons`): rendered once per bundle id into 48 px CGImages and cached, so no full NSImage representation stays alive.
+- Allocator: `Info.plist` sets `LSEnvironment.MallocSpaceEfficient=1`, which cuts about 3 MB of malloc slack at launch and after shows (measured with `scripts/footprint.py`).
+- **Settings window**: rune, in a `mojito settings` child process so its GPU and view memory return to the system on close; regular window (fixed-size so tiling window managers float it), opened from the status item; activation policy flips Accessory -> Regular while open and back. Panes: pinned apps (add from installed-app catalog scan, assign trigger key, remove), behavior (tap threshold), permissions (live state, open System Settings, degraded-mode banner), remap status (installed/reinstall/restore). Trigger capture happens in the window via `.on_physical_input`: the tap engine passes bare keys through when meta is not held, so the focused settings window receives them; the recorder shows the glyph from the layout snapshot. rune-kit `ShortcutRecorder` is rejected for now: it models modifier chords, and our triggers are bare physical keys.
 - Theme: `rune-theme-opencode` tokens (`theme(dark)`, `FONTS`, `FAMILIES`); no color literals outside the theme; one accent per surface; hover instant; settings rows never hover-fill.
 
 ## Process shape
 
-- Threads: main (rune AppKit loop, observers, status item, windows, all TIS/AX/activation via jobs) and tap (three taps, health timer, engine inline). Nothing else. Idle CPU about zero: run loops park, hidden prewarmed overlays run handler frames without drawing and pace themselves (rune `overlay/options.rs:179`, `overlay/more_tests.rs:119` — verified in source), `poll` returns false when nothing drained, the permission poll stops after the grant.
+- Threads: main (AppKit loop, observers, status item, switcher panel, all TIS/AX/activation via jobs) and tap (three taps, health timer, engine inline). Nothing else. Idle CPU about zero: run loops park, the main thread wakes only when the tap thread dispatches a pump, the permission poll stops after the grant.
 - Quit discipline (hex `macos_rune.rs:498-528`): observe `NSApplicationWillTerminateNotification` before the loop runs; on quit, flip the shutdown flag, stop the taps, restore the hidutil mapping if capture is off, join the tap thread bounded, then `_exit(0)`.
 - Packaging: `scripts/build-app.sh` mirrors hex's `build-app.sh`: `cargo build --release`, assemble `Mojito.app/Contents/{MacOS,Resources}`, Info.plist with `CFBundleIdentifier`, `CFBundleExecutable`, `LSUIElement=true`, `LSMinimumSystemVersion 15.0`, `NSAccessibilityUsageDescription`; ad-hoc `codesign --force --sign -`. Bundle before first run so the TCC grant attaches to the bundle id. `scripts/check` runs fmt, clippy `-D warnings`, and tests. Files stay under 800 non-test lines.
 
@@ -281,7 +284,7 @@ Needs a human on macOS: LED stays dark and Caps never reaches any app (TextEdit 
 - `NSRunningApplication.activate()` binding availability in objc2 on macOS 15 (plain `activate` exists 14+; fall back to `activateWithOptions`).
 - Live-list staleness mid-hold (an app launched a second ago may be missing); acceptable, switching still activates windowless apps.
 - Sequoia Login-Items consent can silently disable the LaunchAgent; self-heal plus a status badge is the mitigation, and first-run UX includes one consent click.
-- The idle-draw budget relies on rune's hidden-overlay pacing; assert it with surface stats during implementation rather than trusting this doc.
+- The footprint budget depends on keeping Metal out of the main process; any rune view added there brings back the ~92 MB encoder allocation. Check with `scripts/footprint.py`.
 
 ## Synthesis note
 

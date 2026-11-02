@@ -1,5 +1,6 @@
 //! The three sections' content: pinned apps with trigger capture, behavior
-//! (the tap threshold and the key-hint layout picker), and system
+//! (the switcher trigger, the tap threshold and the key-hint layout picker),
+//! and system
 //! (permissions and the Caps Lock remap).
 
 use rune::{El, PhysicalInput, ScrollSpec, Tx, col, el, icon, row, text};
@@ -11,9 +12,11 @@ use super::controls::{
 };
 use super::{
     CatalogState, PinnedDraft, SettingsState, add_app, add_top_match, capture_input, catalog_key,
-    catalog_matches, choose_layout, is_pinned, remove_row, start_capture, toggle_remap,
+    catalog_matches, choose_layout, choose_trigger, is_pinned, remove_row, start_capture,
+    toggle_remap,
 };
 use crate::catalog::CatalogApp;
+use mojito_core::SwitcherTrigger;
 use mojito_macos::permission;
 
 /// How tall the catalog list may grow before it scrolls inside its card.
@@ -32,6 +35,12 @@ pub(super) fn apps(s: &SettingsState, p: Paint, _layer: &mut Vec<El>) -> El {
 
 pub(super) fn behavior(s: &SettingsState, p: Paint, layer: &mut Vec<El>) -> El {
     sections("behavior")
+        .child(section(
+            p,
+            "switcher",
+            "Switcher",
+            vec![trigger_row(s, p, layer)],
+        ))
         .child(section(p, "tapping", "Tapping", vec![tap_row(s, p)]))
         .child(section(
             p,
@@ -282,6 +291,45 @@ fn catalog_row(p: Paint, app: &CatalogApp, pinned: bool, top: bool) -> El {
 }
 
 // --- Behavior -------------------------------------------------------------
+
+fn trigger_name(trigger: SwitcherTrigger) -> &'static str {
+    match trigger {
+        SwitcherTrigger::CapsE => "Caps Lock + E",
+        SwitcherTrigger::CmdTab => "⌘ Tab",
+        SwitcherTrigger::Both => "Either",
+    }
+}
+
+fn trigger_row(s: &SettingsState, p: Paint, layer: &mut Vec<El>) -> El {
+    let choices = SwitcherTrigger::ALL
+        .into_iter()
+        .map(|trigger| Choice {
+            label: trigger_name(trigger).to_string(),
+            selected: s.trigger == trigger,
+            choose: Box::new(move |s: &mut SettingsState, tx: &mut Tx| {
+                choose_trigger(s, trigger, tx)
+            }),
+        })
+        .collect();
+    setting_row(
+        p,
+        "trigger",
+        "Open the switcher with",
+        Some(
+            "Hold ⌘ and tap Caps Lock, or hold Caps Lock and press E. Tab flips between pinned and open apps.",
+        ),
+        select(
+            p,
+            "trigger",
+            trigger_name(s.trigger),
+            s.trigger_menu_open,
+            choices,
+            |s: &mut SettingsState| s.trigger_menu_open = !s.trigger_menu_open,
+            |s: &mut SettingsState| s.trigger_menu_open = false,
+            layer,
+        ),
+    )
+}
 
 fn tap_row(s: &SettingsState, p: Paint) -> El {
     let stepper = row()

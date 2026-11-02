@@ -13,6 +13,7 @@ pub struct Config {
     /// Which installed layout renders hint glyphs (InputSourceID); None
     /// follows the current input source.
     pub hint_layout: Option<String>,
+    pub switcher_trigger: SwitcherTrigger,
     /// Bumped on every accepted save so the engine can rebuild tables lazily.
     pub version: u64,
 }
@@ -25,7 +26,39 @@ impl Default for Config {
             capture_enabled: true,
             label_memory: crate::labels::LabelMemory::default(),
             hint_layout: None,
+            switcher_trigger: SwitcherTrigger::Both,
             version: 0,
+        }
+    }
+}
+
+/// Which gesture opens the switcher: Caps+E, Cmd+Tab (taking it over from
+/// macOS), or either.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SwitcherTrigger {
+    CapsE,
+    CmdTab,
+    Both,
+}
+
+impl SwitcherTrigger {
+    pub const ALL: [Self; 3] = [Self::CapsE, Self::CmdTab, Self::Both];
+
+    pub fn caps_e(self) -> bool {
+        matches!(self, Self::CapsE | Self::Both)
+    }
+
+    pub fn cmd_tab(self) -> bool {
+        matches!(self, Self::CmdTab | Self::Both)
+    }
+
+    fn parse(name: &str) -> Option<Self> {
+        match name {
+            "caps_e" => Some(Self::CapsE),
+            "cmd_tab" => Some(Self::CmdTab),
+            "both" => Some(Self::Both),
+            _ => None,
         }
     }
 }
@@ -89,6 +122,14 @@ pub fn parse(bytes: &[u8]) -> (Config, Vec<Warning>) {
             )),
         }
     }
+    if let Some(v) = obj.get("switcher_trigger") {
+        match v.as_str().and_then(SwitcherTrigger::parse) {
+            Some(trigger) => config.switcher_trigger = trigger,
+            None => warnings.push(Warning(
+                "switcher_trigger: invalid value; using both".into(),
+            )),
+        }
+    }
     if let Some(v) = obj.get("version") {
         match v.as_u64() {
             Some(n) => config.version = n,
@@ -115,7 +156,9 @@ pub fn parse(bytes: &[u8]) -> (Config, Vec<Warning>) {
                         continue;
                     };
                     if let Some(reason) = unbindable(key) {
-                        warnings.push(Warning(format!("pinned[{i}]: key {key:?} {reason}; skipped")));
+                        warnings.push(Warning(format!(
+                            "pinned[{i}]: key {key:?} {reason}; skipped"
+                        )));
                         continue;
                     }
                     if !seen.insert(key) {
@@ -217,7 +260,7 @@ pub fn validate(draft: Config) -> (Config, Vec<Warning>) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::key::{ESC, F18, SWITCHER, RETURN};
+    use crate::key::{ESC, F18, RETURN, SWITCHER};
     use crate::labels::LabelMemory;
 
     fn parse_str(json: &str) -> (Config, Vec<Warning>) {
@@ -347,6 +390,7 @@ mod tests {
             capture_enabled: false,
             label_memory: LabelMemory([("com.a".into(), PhysicalKey(3))].into_iter().collect()),
             hint_layout: None,
+            switcher_trigger: SwitcherTrigger::CmdTab,
             version: 12,
         };
         let bytes = serde_json::to_string_pretty(&original).unwrap();
@@ -356,6 +400,7 @@ mod tests {
         assert_eq!(parsed.tap_max_ms, 180);
         assert!(!parsed.capture_enabled);
         assert_eq!(parsed.label_memory.0, original.label_memory.0);
+        assert_eq!(parsed.switcher_trigger, SwitcherTrigger::CmdTab);
         assert_eq!(parsed.version, 12);
     }
 

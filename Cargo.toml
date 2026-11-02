@@ -16,8 +16,10 @@ objc2-core-foundation = "0.3.2"
 objc2-core-graphics = "0.3.2"
 objc2-application-services = "0.3.2"
 objc2-foundation = "0.3.2"
+objc2-quartz-core = "0.3.2"
 objc2-service-management = { version = "0.3.2", features = ["SMAppService"] }
 block2 = "0.6.2"
+dispatch2 = "0.3.1"
 
 [patch.'https://github.com/anomalyco/rune']
 # Vendored rune (see vendor/rune/README-mojito.md): smaller text and image

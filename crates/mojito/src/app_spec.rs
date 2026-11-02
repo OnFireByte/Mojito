@@ -3,19 +3,18 @@
 
 use rune::{AppSpec, ConfiguredWindowOptions, WindowOptions};
 
-use crate::Hub;
 use crate::ui_settings::{self, SettingsState};
 
-/// The hub app: windowless, keeps running, its `poll` is the main-thread
-/// pump. The window is never created; the spec only carries fonts and the
-/// poll closure into the event loop.
-pub fn hub_spec() -> AppSpec<Hub> {
-    AppSpec {
-        fonts: rune_theme_opencode::FONTS,
-        families: rune_theme_opencode::FAMILIES,
-        poll: Some(crate::hub_poll),
-        ..AppSpec::new("Mojito", (1.0, 1.0), Hub::default, |_: &Hub, _| rune::el())
-    }
+#[derive(Default)]
+pub struct Detached;
+
+pub fn detached_spec() -> AppSpec<Detached> {
+    AppSpec::new(
+        "Mojito",
+        (1.0, 1.0),
+        Detached::default,
+        |_: &Detached, _| rune::el(),
+    )
 }
 
 pub fn settings_spec() -> AppSpec<SettingsState> {

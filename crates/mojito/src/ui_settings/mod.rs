@@ -13,13 +13,13 @@ use std::time::Duration;
 
 use mojito_core::config::{self, PinnedApp};
 use mojito_core::labels::{LABEL_PRIORITY, RESERVED};
-use mojito_core::{ConfigStore, PhysicalKey};
+use mojito_core::{ConfigStore, PhysicalKey, SwitcherTrigger};
 use mojito_macos::caps::CapsMap;
 use mojito_macos::layout::LayoutInfo;
 use mojito_macos::{layout, permission};
 use rune::{App, AppHandle, Key, KeyEvent, PhysicalInput, RunOptions, TextEdit, Tx, WindowSpec};
 
-use crate::Hub;
+use crate::app_spec::Detached;
 use crate::catalog::{self, CatalogApp};
 use crate::keysym;
 
@@ -91,7 +91,7 @@ struct Status {
 
 pub struct SettingsState {
     store: Arc<ConfigStore>,
-    hub: AppHandle<Hub>,
+    hub: AppHandle<Detached>,
     pane: Pane,
     rows: Vec<PinnedDraft>,
     capturing: Option<usize>,
@@ -106,6 +106,8 @@ pub struct SettingsState {
     /// TIS call is main-thread only).
     layouts: Vec<LayoutInfo>,
     hint_menu_open: bool,
+    trigger: SwitcherTrigger,
+    trigger_menu_open: bool,
     perm_ready: bool,
     remap_active: bool,
     status: Option<Status>,
@@ -120,7 +122,7 @@ impl SettingsState {
         unreachable!("App::init replaces AppSpec::init")
     }
 
-    pub fn new(store: Arc<ConfigStore>, hub: AppHandle<Hub>) -> Self {
+    pub fn new(store: Arc<ConfigStore>, hub: AppHandle<Detached>) -> Self {
         let mut s = Self {
             store,
             hub,
@@ -135,6 +137,8 @@ impl SettingsState {
             hint_layout: None,
             layouts: Vec::new(),
             hint_menu_open: false,
+            trigger: SwitcherTrigger::Both,
+            trigger_menu_open: false,
             perm_ready: false,
             remap_active: false,
             status: None,
@@ -166,6 +170,7 @@ impl SettingsState {
             .collect();
         self.tap_max = config.tap_max_ms;
         self.hint_layout = config.hint_layout.clone();
+        self.trigger = config.switcher_trigger;
         self.layouts = layout::installed();
         self.capturing = None;
         self.perm_ready = permission::state() == permission::PermissionState::Ready;
@@ -184,6 +189,7 @@ pub fn opened(s: &mut SettingsState, tx: &mut Tx) {
 /// process and returns every byte it held to the system; saves post the
 /// reserved reload keycode so the engine applies them live.
 pub fn run_child() {
+    unsafe { std::env::set_var("RUNE_GPU_BACKEND", "metal") };
     let store = Arc::new(ConfigStore::open(crate::settings_path()));
     // Regular, not accessory: an accessory app's window cannot become key
     // when it opens, so the settings window would start unfocused.
@@ -195,10 +201,11 @@ pub fn run_child() {
         // The hint picker's saved choice decides which layout spells the
         // badges, exactly as the hub applies it before the first reveal.
         layout::set_display_layout(store.handle().load().hint_layout.clone());
-        // The state's handle wants a Hub; a detached windowless hub app
-        // satisfies it without adding a surface. This process's lifetime
-        // is the settings window's, so no keep_running.
-        let hub = App::new(crate::app_spec::hub_spec()).windowless().handle();
+        // This process's lifetime is the settings window's, so no
+        // keep_running.
+        let hub = App::new(crate::app_spec::detached_spec())
+            .windowless()
+            .handle();
         let app = App::new(crate::app_spec::settings_spec())
             .standard_menus()
             .on_close(closed)
@@ -225,6 +232,7 @@ pub fn closed(s: &mut SettingsState, _: &mut Tx) {
     s.hub.set_dock_icon(false);
     s.capturing = None;
     s.hint_menu_open = false;
+    s.trigger_menu_open = false;
     close_catalog(s);
     s.live_refresh = false;
 }
@@ -272,6 +280,7 @@ fn save(s: &mut SettingsState, tx: &mut Tx) {
         .collect();
     next.tap_max_ms = s.tap_max;
     next.hint_layout = s.hint_layout.clone();
+    next.switcher_trigger = s.trigger;
     next.version += 1;
     let (next, warnings) = config::validate(next);
     // The parent engine owns label memory; this process's snapshot must not
@@ -419,6 +428,12 @@ fn choose_layout(s: &mut SettingsState, id: Option<String>, tx: &mut Tx) {
     // layout; the overlay process learns of the pick through the saved
     // config and the reload signal.
     layout::set_display_layout(id);
+    save(s, tx);
+}
+
+fn choose_trigger(s: &mut SettingsState, trigger: SwitcherTrigger, tx: &mut Tx) {
+    s.trigger_menu_open = false;
+    s.trigger = trigger;
     save(s, tx);
 }
 

@@ -1,7 +1,7 @@
 //! Label assignment: deterministic, injective, Colemak-DH reach order.
 
 use crate::bridge::AppSlot;
-use crate::key::{ESC, F18, PhysicalKey, RETURN, SWITCHER};
+use crate::key::{ESC, F18, PhysicalKey, RETURN, SWITCHER, TAB};
 use std::collections::HashSet;
 
 /// QWERTY-position virtual keycodes, best reach first. The first ten are the
@@ -41,7 +41,7 @@ pub const LABEL_PRIORITY: [PhysicalKey; 26] = [
 
 /// Keys no label or pin may ever take. Enforced in config validation and in
 /// label assignment; single source of truth.
-pub const RESERVED: [PhysicalKey; 4] = [F18, ESC, RETURN, SWITCHER];
+pub const RESERVED: [PhysicalKey; 5] = [F18, ESC, RETURN, SWITCHER, TAB];
 
 /// Sticky label memory: an app keeps its last label when that key is free
 /// this activation, so labels stay consistent across activations.
@@ -169,7 +169,11 @@ mod tests {
     fn memory_pointing_at_reserved_or_pinned_keys_is_ignored() {
         let rows = [slot(1, Some("b1")), slot(2, Some("b2"))];
         let f = LABEL_PRIORITY[0];
-        let memory = LabelMemory([("b1".into(), SWITCHER), ("b2".into(), f)].into_iter().collect());
+        let memory = LabelMemory(
+            [("b1".into(), SWITCHER), ("b2".into(), f)]
+                .into_iter()
+                .collect(),
+        );
         let labels = assign_labels(&rows, &memory, &[f]);
         assert_eq!(labels[0], Some(LABEL_PRIORITY[1])); // e reserved, f pinned -> d
         assert_eq!(labels[1], Some(LABEL_PRIORITY[2])); // f pinned again -> s

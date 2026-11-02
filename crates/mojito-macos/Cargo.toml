@@ -11,8 +11,10 @@ objc2-core-foundation.workspace = true
 objc2-core-graphics.workspace = true
 objc2-application-services.workspace = true
 objc2-foundation.workspace = true
+objc2-quartz-core.workspace = true
 objc2-service-management.workspace = true
 block2.workspace = true
+dispatch2.workspace = true
 
 # AppKit types the backend touches directly: status item, workspace/index,
 # running applications. Features are additive to the workspace defaults.

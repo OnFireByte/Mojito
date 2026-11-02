@@ -4,7 +4,7 @@
 
 use crate::bridge::{AppRef, Job, LiveModel, LiveRow, PinnedRow, SwitchRequest, UiMsg};
 use crate::config::Config;
-use crate::key::{ESC, F18, ModifierFlags, PhysicalKey};
+use crate::key::{ESC, F18, ModifierFlags, PhysicalKey, TAB};
 use crate::labels::LabelMemory;
 use crate::tables::{Chord, Tables, build_tables};
 use arc_swap::ArcSwap;
@@ -71,11 +71,14 @@ enum Phase {
     /// every bare key is ours. F18 may be up or down under this phase.
     /// `rearm` is a second meta press over the open overlay, holding whether
     /// a key was used under it: a bare release dismisses the overlay, a used
-    /// one keeps it.
+    /// one keeps it. `via_cmd` marks an overlay Cmd+Tab opened or toggled:
+    /// the user is likely still holding Cmd, so Cmd belongs to the gesture
+    /// and no longer turns keys into pass-through chords.
     Overlay {
         overlay: OverlayPhase,
         committed: bool,
         rearm: Option<bool>,
+        via_cmd: bool,
     },
 }
 
@@ -173,7 +176,11 @@ impl Engine {
             && t == ev.t
         {
             // The other tap already decided this exact event.
-            return if passed { vec![Action::Pass] } else { vec![Action::Swallow] };
+            return if passed {
+                vec![Action::Pass]
+            } else {
+                vec![Action::Swallow]
+            };
         }
         let actions = self.decide(ev);
         let passed = !matches!(actions.first(), Some(Action::Swallow));
@@ -185,6 +192,9 @@ impl Engine {
     fn decide(&mut self, ev: RawKey) -> Vec<Action> {
         if ev.key == F18 {
             return self.on_f18(ev);
+        }
+        if ev.key == TAB && ev.down && !ev.repeat && self.takes_cmd_tab(ev.flags) {
+            return self.on_cmd_tab();
         }
         let ix = ev.key.0 as usize;
         if ix >= self.route.len() {
@@ -226,7 +236,13 @@ impl Engine {
     /// engine directly, so it posts the reserved control keycode and the tap
     /// calls this. No-op unless an uncommitted overlay is open.
     pub fn cancel_overlay(&mut self) -> Vec<Action> {
-        if matches!(self.phase, Phase::Overlay { committed: false, .. }) {
+        if matches!(
+            self.phase,
+            Phase::Overlay {
+                committed: false,
+                ..
+            }
+        ) {
             self.cancel_state()
         } else {
             vec![]
@@ -288,7 +304,9 @@ impl Engine {
             Phase::Held { .. } => {}
             // A bare release of the second meta press dismisses the sticky
             // overlay; a release after using keys keeps it open.
-            Phase::Overlay { rearm: Some(used), .. } => dismiss = !*used,
+            Phase::Overlay {
+                rearm: Some(used), ..
+            } => dismiss = !*used,
             Phase::Overlay { rearm: None, .. } => {}
         }
         if dismiss {
@@ -317,6 +335,46 @@ impl Engine {
         ) && matches!(self.tables.hidden.get(ix), Some(Some(Chord::Synth(_))))
     }
 
+    /// Cmd+Tab (shift allowed, for Cmd+Shift+Tab) belongs to Mojito when the
+    /// trigger setting says so; with Ctrl or Opt it stays a system chord.
+    fn takes_cmd_tab(&self, flags: ModifierFlags) -> bool {
+        flags.intersects(ModifierFlags::CMD)
+            && !flags.intersects(ModifierFlags(ModifierFlags::CTRL.0 | ModifierFlags::OPT.0))
+            && self.config.load().switcher_trigger.cmd_tab()
+    }
+
+    /// Cmd+Tab opens the pinned list, and pressed again flips between the
+    /// pinned and open apps, like Tab inside the overlay. Its up and
+    /// autorepeats are swallowed.
+    fn on_cmd_tab(&mut self) -> Vec<Action> {
+        self.route[TAB.0 as usize] = Route::Swallow;
+        let actions = match &self.phase {
+            Phase::Overlay {
+                overlay: OverlayPhase::Pinned,
+                ..
+            } => self.enter_live(),
+            _ => self.enter_pinned(),
+        };
+        if let Phase::Overlay { via_cmd, .. } = &mut self.phase {
+            *via_cmd = true;
+        }
+        actions
+    }
+
+    /// Cmd stops making chords inside an overlay that Cmd+Tab drives, so
+    /// labels and tab work while Cmd is still down.
+    fn chord_flags(&self) -> ModifierFlags {
+        if self.via_cmd() {
+            ModifierFlags(ModifierFlags::CTRL.0 | ModifierFlags::OPT.0)
+        } else {
+            CHORD
+        }
+    }
+
+    fn via_cmd(&self) -> bool {
+        matches!(self.phase, Phase::Overlay { via_cmd: true, .. })
+    }
+
     /// A committed hold is inert until F18 releases.
     fn committed(&self) -> bool {
         match &self.phase {
@@ -329,7 +387,7 @@ impl Engine {
     /// everything else routes through the layer's table, and a live label
     /// outranks the pinned table.
     fn decide_down(&mut self, ev: RawKey, ix: usize) -> Vec<Action> {
-        if ev.flags.intersects(CHORD) && !self.synthesizes(ix) {
+        if ev.flags.intersects(self.chord_flags()) && !self.synthesizes(ix) {
             self.route[ix] = Route::Pass;
             return vec![Action::Pass];
         }
@@ -484,6 +542,7 @@ impl Engine {
             overlay: OverlayPhase::Pinned,
             committed: false,
             rearm: None,
+            via_cmd: self.via_cmd(),
         };
         vec![
             Action::Swallow,
@@ -529,6 +588,7 @@ impl Engine {
             overlay: OverlayPhase::Live(Box::new(LiveModel { rows: rows.clone() })),
             committed: false,
             rearm: None,
+            via_cmd: self.via_cmd(),
         };
         vec![
             Action::Swallow,

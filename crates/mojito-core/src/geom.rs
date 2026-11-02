@@ -1,6 +1,6 @@
-//! Overlay placement math, pure and testable. Points are in the global
-//! point space (top-left of the primary display, y-down), matching rune's
-//! `OverlayPlacement::Rect`.
+//! Overlay placement math, pure and testable. Points and display bounds
+//! share one global point space; the macOS switcher passes AppKit's
+//! (bottom-left of the primary display, y-up).
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Rect {

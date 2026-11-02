@@ -4,6 +4,7 @@
 use crate::config::Config;
 use crate::key::{
     ARROW_DOWN, ARROW_LEFT, ARROW_RIGHT, ARROW_UP, BACKSPACE, ESC, PhysicalKey, RETURN, SWITCHER,
+    TAB,
 };
 
 pub const TABLE_SLOTS: usize = 128;
@@ -29,8 +30,9 @@ pub struct Tables {
 }
 
 /// Build both tables from config. The hidden table is the const spec:
-/// h/j/k/l arrows, i backspace, enter toggles the input source, e open.
-/// The pinned table: user trigger keys first, then e toggle, then esc cancel.
+/// h/j/k/l arrows, i backspace, enter toggles the input source, e opens
+/// when the trigger setting allows it. The pinned table: user trigger keys
+/// first, then e and tab toggle, then esc cancel.
 /// Duplicate trigger keys resolve first-wins; reserved keys never take a
 /// chord even if a malformed config carries them.
 pub fn build_tables(config: &Config) -> Tables {
@@ -43,13 +45,35 @@ pub fn build_tables(config: &Config) -> Tables {
             slot[key.0 as usize] = Some(chord);
         }
     };
-    put(&mut tables.hidden, PhysicalKey(0x04), Chord::Synth(ARROW_LEFT)); // h
-    put(&mut tables.hidden, PhysicalKey(0x26), Chord::Synth(ARROW_DOWN)); // j
-    put(&mut tables.hidden, PhysicalKey(0x28), Chord::Synth(ARROW_UP)); // k
-    put(&mut tables.hidden, PhysicalKey(0x25), Chord::Synth(ARROW_RIGHT)); // l
-    put(&mut tables.hidden, PhysicalKey(0x22), Chord::Synth(BACKSPACE)); // i
+    put(
+        &mut tables.hidden,
+        PhysicalKey(0x04),
+        Chord::Synth(ARROW_LEFT),
+    ); // h
+    put(
+        &mut tables.hidden,
+        PhysicalKey(0x26),
+        Chord::Synth(ARROW_DOWN),
+    ); // j
+    put(
+        &mut tables.hidden,
+        PhysicalKey(0x28),
+        Chord::Synth(ARROW_UP),
+    ); // k
+    put(
+        &mut tables.hidden,
+        PhysicalKey(0x25),
+        Chord::Synth(ARROW_RIGHT),
+    ); // l
+    put(
+        &mut tables.hidden,
+        PhysicalKey(0x22),
+        Chord::Synth(BACKSPACE),
+    ); // i
     put(&mut tables.hidden, RETURN, Chord::ToggleInput);
-    put(&mut tables.hidden, SWITCHER, Chord::OpenPinned);
+    if config.switcher_trigger.caps_e() {
+        put(&mut tables.hidden, SWITCHER, Chord::OpenPinned);
+    }
 
     for (i, app) in config.pinned.iter().enumerate() {
         if crate::labels::RESERVED.contains(&app.key) {
@@ -61,6 +85,7 @@ pub fn build_tables(config: &Config) -> Tables {
         put(&mut tables.pinned, app.key, Chord::TriggerPin(i as u16));
     }
     put(&mut tables.pinned, SWITCHER, Chord::ToggleMode);
+    put(&mut tables.pinned, TAB, Chord::ToggleMode);
     put(&mut tables.pinned, ESC, Chord::Cancel);
     tables
 }

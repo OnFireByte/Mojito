@@ -46,6 +46,7 @@ pub const ARROW_RIGHT: PhysicalKey = PhysicalKey(0x7C);
 pub const ARROW_DOWN: PhysicalKey = PhysicalKey(0x7D);
 pub const ARROW_UP: PhysicalKey = PhysicalKey(0x7E);
 pub const SWITCHER: PhysicalKey = PhysicalKey(0x0E);
+pub const TAB: PhysicalKey = PhysicalKey(0x30);
 
 /// HID usages for the hidutil remap. Apple TN2450 encodes a full usage as
 /// (usage_page << 32) | usage, so keyboard-page values are 36-bit: caps lock

@@ -1,9 +1,8 @@
 //! NSStatusItem via objc2 (hex macos_rune/status_item.rs pattern). Menu:
-//! Settings, Start at Login, Restore Caps Lock, About, Quit. Actions cross
-//! to the main pump over a SyncSender.
+//! Settings, Start at Login, Restore Caps Lock, About, Quit. Actions run
+//! on the main thread through the callback `install` takes.
 
 use std::cell::RefCell;
-use std::sync::mpsc::SyncSender;
 
 use objc2::rc::Retained;
 use objc2::runtime::{AnyObject, NSObjectProtocol};
@@ -36,9 +35,8 @@ pub enum MenuAction {
     Quit,
 }
 
-#[derive(Debug)]
 struct MenuTargetIvars {
-    actions: SyncSender<MenuAction>,
+    actions: Box<dyn Fn(MenuAction)>,
 }
 
 objc2::define_class!(
@@ -52,28 +50,28 @@ objc2::define_class!(
     impl MenuTarget {
         #[unsafe(method(openSettings:))]
         fn open_settings(&self, _sender: &AnyObject) {
-            let _ = self.ivars().actions.try_send(MenuAction::OpenSettings);
+            (self.ivars().actions)(MenuAction::OpenSettings);
         }
 
         #[unsafe(method(toggleLogin:))]
         fn toggle_login(&self, _sender: &AnyObject) {
-            let _ = self.ivars().actions.try_send(MenuAction::ToggleLogin);
+            (self.ivars().actions)(MenuAction::ToggleLogin);
         }
 
         #[unsafe(method(restoreCaps:))]
         fn restore_caps(&self, _sender: &AnyObject) {
-            let _ = self.ivars().actions.try_send(MenuAction::RestoreCaps);
+            (self.ivars().actions)(MenuAction::RestoreCaps);
         }
 
         #[unsafe(method(quit:))]
         fn quit(&self, _sender: &AnyObject) {
-            let _ = self.ivars().actions.try_send(MenuAction::Quit);
+            (self.ivars().actions)(MenuAction::Quit);
         }
     }
 );
 
 impl MenuTarget {
-    fn new(actions: SyncSender<MenuAction>, mtm: MainThreadMarker) -> Retained<Self> {
+    fn new(actions: Box<dyn Fn(MenuAction)>, mtm: MainThreadMarker) -> Retained<Self> {
         let this = Self::alloc(mtm).set_ivars(MenuTargetIvars { actions });
         // SAFETY: NSObject's designated initializer on a fresh allocation whose
         // ivars are already set; the class does not override init.
@@ -95,14 +93,14 @@ thread_local! {
     static STATUS_ITEM: RefCell<Option<StatusItemController>> = const { RefCell::new(None) };
 }
 
-/// Install the status item; actions cross to the main pump over a channel.
-pub fn install(tx: SyncSender<MenuAction>) -> Result<(), String> {
+/// Install the status item; menu actions call `on_action` on the main thread.
+pub fn install(on_action: impl Fn(MenuAction) + 'static) -> Result<(), String> {
     let mtm = MainThreadMarker::new()
         .ok_or_else(|| "the status item requires the main thread".to_string())?;
     if STATUS_ITEM.with_borrow(|slot| slot.is_some()) {
         return Err("status item is already installed".into());
     }
-    let target = MenuTarget::new(tx, mtm);
+    let target = MenuTarget::new(Box::new(on_action), mtm);
     let menu = NSMenu::initWithTitle(NSMenu::alloc(mtm), &NSString::from_str("Mojito"));
     menu.setAutoenablesItems(false);
     add_item(&menu, &target, "Settings…", sel!(openSettings:), mtm);

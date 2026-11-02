@@ -5,7 +5,7 @@ use arc_swap::ArcSwap;
 use mojito_core::bridge::AppSlot;
 use mojito_core::{
     Action, AppIndex, AppRef, Config, Engine, Job, ModifierFlags, Mono, PhysicalKey, PinnedApp,
-    RawKey, SwitchRequest, SynthKey, UiMsg,
+    RawKey, SwitchRequest, SwitcherTrigger, SynthKey, UiMsg,
 };
 use std::sync::Arc;
 
@@ -30,8 +30,13 @@ fn ms(t: u64) -> Mono {
 }
 
 fn rig(pinned: Vec<PinnedApp>, slots: Vec<AppSlot>) -> Engine {
+    rig_with(SwitcherTrigger::Both, pinned, slots)
+}
+
+fn rig_with(trigger: SwitcherTrigger, pinned: Vec<PinnedApp>, slots: Vec<AppSlot>) -> Engine {
     let config = Arc::new(ArcSwap::from_pointee(Config {
         pinned,
+        switcher_trigger: trigger,
         ..Default::default()
     }));
     let index = Arc::new(ArcSwap::from_pointee(AppIndex { slots }));
@@ -39,7 +44,12 @@ fn rig(pinned: Vec<PinnedApp>, slots: Vec<AppSlot>) -> Engine {
 }
 
 fn standard_rig() -> Engine {
-    rig(
+    standard_rig_with(SwitcherTrigger::Both)
+}
+
+fn standard_rig_with(trigger: SwitcherTrigger) -> Engine {
+    rig_with(
+        trigger,
         vec![PinnedApp {
             name: "Finder".into(),
             bundle_id: "com.apple.finder".into(),
@@ -260,7 +270,10 @@ fn shift_chord_honored_on_routed_keys() {
 #[test]
 fn cmd_opt_ctrl_ride_along_on_routed_keys_through_repeat_and_up() {
     let chord = ModifierFlags(
-        ModifierFlags::CMD.0 | ModifierFlags::OPT.0 | ModifierFlags::CTRL.0 | ModifierFlags::SHIFT.0,
+        ModifierFlags::CMD.0
+            | ModifierFlags::OPT.0
+            | ModifierFlags::CTRL.0
+            | ModifierFlags::SHIFT.0,
     );
     let arrow = |down| {
         vec![
@@ -341,8 +354,14 @@ fn pinned_trigger_key_is_inert_in_the_live_list() {
     engine.on_event(key(F18, true, 0));
     engine.on_event(key(SWITCHER, true, 10));
     engine.on_event(key(SWITCHER, true, 20));
-    assert_eq!(engine.on_event(key(TRIGGER, true, 30)), vec![Action::Swallow]);
-    assert_eq!(engine.on_event(key(TRIGGER, false, 40)), vec![Action::Swallow]);
+    assert_eq!(
+        engine.on_event(key(TRIGGER, true, 30)),
+        vec![Action::Swallow]
+    );
+    assert_eq!(
+        engine.on_event(key(TRIGGER, false, 40)),
+        vec![Action::Swallow]
+    );
 }
 
 #[test]
@@ -461,7 +480,10 @@ fn commit_with_meta_held_stays_inert_until_release() {
     let commit = engine.on_event(key(TRIGGER, true, 20));
     assert_eq!(ui(&commit[1]), Some(&UiMsg::Hide));
     // The rest of the hold is inert: no re-trigger, no typing.
-    assert_eq!(engine.on_event(key(TRIGGER, true, 30)), vec![Action::Swallow]);
+    assert_eq!(
+        engine.on_event(key(TRIGGER, true, 30)),
+        vec![Action::Swallow]
+    );
     assert_eq!(engine.on_event(key(F18, false, 40)), vec![Action::Swallow]);
     // Idle again.
     assert_eq!(engine.on_event(key(0x2C, true, 50)), vec![Action::Pass]);
@@ -478,7 +500,10 @@ fn cancel_overlay_control_only_reaches_an_open_overlay() {
     let cancel = engine.cancel_overlay();
     assert_eq!(cancel, vec![Action::Ui(UiMsg::HideFade)]);
     let arrow = engine.on_event(key(H, true, 20));
-    assert!(matches!(arrow.as_slice(), [Action::Swallow, Action::Synth(_)]));
+    assert!(matches!(
+        arrow.as_slice(),
+        [Action::Swallow, Action::Synth(_)]
+    ));
 }
 
 #[test]
@@ -487,10 +512,10 @@ fn cmd_chord_passes_during_sticky_overlay_too() {
     engine.on_event(key(F18, true, 0));
     engine.on_event(key(SWITCHER, true, 10));
     engine.on_event(key(F18, false, 20));
-    let down = engine.on_event(flagged(TAB, true, 30, ModifierFlags::CMD));
+    let down = engine.on_event(flagged(Q, true, 30, ModifierFlags::CMD));
     assert_eq!(down, vec![Action::Pass]);
     assert_eq!(
-        engine.on_event(flagged(TAB, false, 40, ModifierFlags::CMD)),
+        engine.on_event(flagged(Q, false, 40, ModifierFlags::CMD)),
         vec![Action::Pass]
     );
 }
@@ -517,9 +542,9 @@ fn esc_cancels_with_a_fade_and_the_hold_survives() {
 fn cmd_chord_passes_during_hold_and_marks_used() {
     let mut engine = standard_rig();
     engine.on_event(key(F18, true, 0));
-    let down = engine.on_event(flagged(TAB, true, 10, ModifierFlags::CMD));
+    let down = engine.on_event(flagged(Q, true, 10, ModifierFlags::CMD));
     assert_eq!(down, vec![Action::Pass]);
-    let up = engine.on_event(flagged(TAB, false, 20, ModifierFlags::CMD));
+    let up = engine.on_event(flagged(Q, false, 20, ModifierFlags::CMD));
     assert_eq!(up, vec![Action::Pass]);
     assert_eq!(engine.on_event(key(F18, false, 30)), vec![Action::Swallow]); // no Esc
 }
@@ -590,10 +615,10 @@ fn up_obeys_down_even_after_release() {
 fn passed_chord_up_obays_its_pass_even_after_release() {
     let mut engine = standard_rig();
     engine.on_event(key(F18, true, 0));
-    engine.on_event(flagged(TAB, true, 10, ModifierFlags::CMD));
+    engine.on_event(flagged(Q, true, 10, ModifierFlags::CMD));
     engine.on_event(key(F18, false, 20));
     assert_eq!(
-        engine.on_event(flagged(TAB, false, 30, ModifierFlags::CMD)),
+        engine.on_event(flagged(Q, false, 30, ModifierFlags::CMD)),
         vec![Action::Pass]
     );
 }
@@ -738,25 +763,43 @@ fn duplicate_events_repeat_the_decision_without_side_effects() {
 
     // A hold that opens the overlay: the duplicated e-down must not open it
     // twice (a second decision here would toggle straight to the live list).
-    assert_eq!(engine.on_event(key(F18, true, 2_000)), vec![Action::Swallow]);
+    assert_eq!(
+        engine.on_event(key(F18, true, 2_000)),
+        vec![Action::Swallow]
+    );
     let open = engine.on_event(key(SWITCHER, true, 2_050));
     assert!(matches!(ui(&open[1]), Some(UiMsg::ShowPinned { .. })));
-    assert_eq!(engine.on_event(key(SWITCHER, true, 2_050)), vec![Action::Swallow]);
+    assert_eq!(
+        engine.on_event(key(SWITCHER, true, 2_050)),
+        vec![Action::Swallow]
+    );
 
     // The sticky overlay survives meta release; the duplicated Esc-down must
     // not fade twice.
-    assert_eq!(engine.on_event(key(F18, false, 2_100)), vec![Action::Swallow]);
+    assert_eq!(
+        engine.on_event(key(F18, false, 2_100)),
+        vec![Action::Swallow]
+    );
     let cancel = engine.on_event(key(ESC, true, 3_000));
     assert_eq!(cancel.len(), 2);
     assert_eq!(cancel[0], Action::Swallow);
     assert!(matches!(ui(&cancel[1]), Some(UiMsg::HideFade)));
-    assert_eq!(engine.on_event(key(ESC, true, 3_000)), vec![Action::Swallow]);
-    assert_eq!(engine.on_event(key(ESC, false, 3_050)), vec![Action::Swallow]);
+    assert_eq!(
+        engine.on_event(key(ESC, true, 3_000)),
+        vec![Action::Swallow]
+    );
+    assert_eq!(
+        engine.on_event(key(ESC, false, 3_050)),
+        vec![Action::Swallow]
+    );
 
     // Idle again: a fresh Esc passes, and a fresh meta tap still synthesizes
     // Esc — no stale overlay state.
     assert_eq!(engine.on_event(key(ESC, true, 4_000)), vec![Action::Pass]);
-    assert_eq!(engine.on_event(key(F18, true, 4_100)), vec![Action::Swallow]);
+    assert_eq!(
+        engine.on_event(key(F18, true, 4_100)),
+        vec![Action::Swallow]
+    );
     let tap_esc = engine.on_event(key(F18, false, 4_200));
     assert_eq!(
         synth(&tap_esc[1]),
@@ -777,14 +820,20 @@ fn tapping_caps_again_dismisses_the_open_overlay() {
     engine.on_event(key(F18, false, 100)); // sticky overlay
 
     // The second caps press and release: fade, then Idle.
-    assert_eq!(engine.on_event(key(F18, true, 5_000)), vec![Action::Swallow]);
+    assert_eq!(
+        engine.on_event(key(F18, true, 5_000)),
+        vec![Action::Swallow]
+    );
     let up = engine.on_event(key(F18, false, 5_100));
     assert_eq!(up.len(), 2);
     assert_eq!(up[0], Action::Swallow);
     assert!(matches!(ui(&up[1]), Some(UiMsg::HideFade)));
 
     // Idle again: a caps tap synthesizes Esc as always.
-    assert_eq!(engine.on_event(key(F18, true, 6_000)), vec![Action::Swallow]);
+    assert_eq!(
+        engine.on_event(key(F18, true, 6_000)),
+        vec![Action::Swallow]
+    );
     let tap = engine.on_event(key(F18, false, 6_100));
     assert_eq!(
         synth(&tap[1]),
@@ -804,11 +853,120 @@ fn using_a_key_during_the_second_hold_keeps_the_overlay() {
     engine.on_event(key(SWITCHER, true, 50));
     engine.on_event(key(F18, false, 100));
 
-    assert_eq!(engine.on_event(key(F18, true, 5_000)), vec![Action::Swallow]);
+    assert_eq!(
+        engine.on_event(key(F18, true, 5_000)),
+        vec![Action::Swallow]
+    );
     let toggle = engine.on_event(key(SWITCHER, true, 5_050)); // e -> live list
     assert!(matches!(ui(&toggle[1]), Some(UiMsg::ShowLive { .. })));
-    assert_eq!(engine.on_event(key(F18, false, 5_200)), vec![Action::Swallow]);
+    assert_eq!(
+        engine.on_event(key(F18, false, 5_200)),
+        vec![Action::Swallow]
+    );
     // Still in the overlay: Esc cancels with the fade.
     let esc = engine.on_event(key(ESC, true, 5_400));
     assert!(matches!(ui(&esc[1]), Some(UiMsg::HideFade)));
+}
+
+#[test]
+fn cmd_tab_opens_the_pinned_list_and_its_up_is_swallowed() {
+    let mut engine = standard_rig();
+    let open = engine.on_event(flagged(TAB, true, 0, ModifierFlags::CMD));
+    assert_eq!(open[0], Action::Swallow);
+    assert!(matches!(ui(&open[1]), Some(UiMsg::ShowPinned { .. })));
+    assert_eq!(job(&open[2]), Some(&Job::RefreshWindowCounts));
+    assert_eq!(
+        engine.on_event(flagged(TAB, false, 10, ModifierFlags::CMD)),
+        vec![Action::Swallow]
+    );
+}
+
+#[test]
+fn cmd_shift_tab_opens_the_switcher_too() {
+    let mut engine = standard_rig();
+    let flags = ModifierFlags(ModifierFlags::CMD.0 | ModifierFlags::SHIFT.0);
+    let open = engine.on_event(flagged(TAB, true, 0, flags));
+    assert!(matches!(ui(&open[1]), Some(UiMsg::ShowPinned { .. })));
+}
+
+#[test]
+fn cmd_tab_again_flips_to_open_apps_and_back() {
+    let mut engine = standard_rig();
+    engine.on_event(flagged(TAB, true, 0, ModifierFlags::CMD));
+    engine.on_event(flagged(TAB, false, 10, ModifierFlags::CMD));
+    let live = engine.on_event(flagged(TAB, true, 20, ModifierFlags::CMD));
+    assert!(matches!(ui(&live[1]), Some(UiMsg::ShowLive { .. })));
+    engine.on_event(flagged(TAB, false, 30, ModifierFlags::CMD));
+    let pinned = engine.on_event(flagged(TAB, true, 40, ModifierFlags::CMD));
+    assert!(matches!(ui(&pinned[1]), Some(UiMsg::ShowPinned { .. })));
+}
+
+#[test]
+fn labels_select_while_cmd_is_still_held_after_cmd_tab() {
+    let mut engine = standard_rig();
+    engine.on_event(flagged(TAB, true, 0, ModifierFlags::CMD));
+    engine.on_event(flagged(TAB, false, 10, ModifierFlags::CMD));
+    engine.on_event(flagged(TAB, true, 20, ModifierFlags::CMD));
+    engine.on_event(flagged(TAB, false, 30, ModifierFlags::CMD));
+    let commit = engine.on_event(flagged(LABEL_FIRST, true, 40, ModifierFlags::CMD));
+    assert_eq!(ui(&commit[1]), Some(&UiMsg::Hide));
+    assert_eq!(
+        job(&commit[2]),
+        Some(&Job::Switch(SwitchRequest {
+            app: AppRef::Pid(42)
+        }))
+    );
+    assert_eq!(
+        engine.on_event(flagged(LABEL_FIRST, false, 50, ModifierFlags::CMD)),
+        vec![Action::Swallow]
+    );
+    assert_eq!(
+        engine.on_event(flagged(Q, true, 60, ModifierFlags::CMD)),
+        vec![Action::Pass]
+    );
+}
+
+#[test]
+fn ctrl_or_opt_with_cmd_tab_stays_a_system_chord() {
+    let mut engine = standard_rig();
+    let flags = ModifierFlags(ModifierFlags::CMD.0 | ModifierFlags::OPT.0);
+    assert_eq!(
+        engine.on_event(flagged(TAB, true, 0, flags)),
+        vec![Action::Pass]
+    );
+}
+
+#[test]
+fn tab_toggles_modes_in_an_overlay_opened_with_caps_e() {
+    let mut engine = standard_rig();
+    engine.on_event(key(F18, true, 0));
+    engine.on_event(key(SWITCHER, true, 10));
+    let live = engine.on_event(key(TAB, true, 20));
+    assert!(matches!(ui(&live[1]), Some(UiMsg::ShowLive { .. })));
+    let pinned = engine.on_event(key(TAB, true, 30));
+    assert!(matches!(ui(&pinned[1]), Some(UiMsg::ShowPinned { .. })));
+}
+
+#[test]
+fn cmd_tab_passes_when_only_caps_e_opens_the_switcher() {
+    let mut engine = standard_rig_with(SwitcherTrigger::CapsE);
+    assert_eq!(
+        engine.on_event(flagged(TAB, true, 0, ModifierFlags::CMD)),
+        vec![Action::Pass]
+    );
+    assert_eq!(
+        engine.on_event(flagged(TAB, false, 10, ModifierFlags::CMD)),
+        vec![Action::Pass]
+    );
+}
+
+#[test]
+fn caps_e_opens_nothing_when_only_cmd_tab_opens_the_switcher() {
+    let mut engine = standard_rig_with(SwitcherTrigger::CmdTab);
+    engine.on_event(key(F18, true, 0));
+    assert_eq!(
+        engine.on_event(key(SWITCHER, true, 10)),
+        vec![Action::Swallow]
+    );
+    assert_eq!(engine.on_event(key(F18, false, 20)), vec![Action::Swallow]);
 }

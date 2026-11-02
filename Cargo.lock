@@ -420,6 +420,8 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1e0e367e4e7da84520dedcac1901e4da967309406d1e51017ae1abfb97adbd38"
 dependencies = [
  "bitflags 2.13.2",
+ "block2 0.6.2",
+ "libc",
  "objc2 0.6.5",
 ]
 
@@ -1075,9 +1077,13 @@ name = "mojito"
 version = "0.1.0"
 dependencies = [
  "arc-swap",
+ "dispatch2",
  "mojito-core",
  "mojito-macos",
  "objc2 0.6.5",
+ "objc2-app-kit 0.3.2",
+ "objc2-core-foundation",
+ "objc2-core-graphics",
  "objc2-foundation 0.3.2",
  "rune",
  "rune-kit",
@@ -1101,6 +1107,7 @@ version = "0.1.0"
 dependencies = [
  "arc-swap",
  "block2 0.6.2",
+ "dispatch2",
  "mojito-core",
  "objc2 0.6.5",
  "objc2-app-kit 0.3.2",
@@ -1108,6 +1115,7 @@ dependencies = [
  "objc2-core-foundation",
  "objc2-core-graphics",
  "objc2-foundation 0.3.2",
+ "objc2-quartz-core 0.3.2",
  "objc2-service-management",
 ]
 
@@ -1622,9 +1630,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "96c1358452b371bf9f104e21ec536d37a650eb10f7ee379fff67d2e08d537f1f"
 dependencies = [
  "bitflags 2.13.2",
+ "block2 0.6.2",
+ "libc",
  "objc2 0.6.5",
  "objc2-core-foundation",
  "objc2-core-graphics",
+ "objc2-core-video",
  "objc2-foundation 0.3.2",
  "objc2-metal 0.3.2",
 ]
