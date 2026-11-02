@@ -81,7 +81,7 @@ pub fn spec() -> ConfiguredOverlay<Switcher> {
             display: DisplayTarget::UnderPointer,
             input: OverlayInput::Regions,
             keys: KeyPolicy::None,
-            exclude_from_capture: true,
+            exclude_from_capture: false,
             prewarm: true,
             ..Default::default()
         })
