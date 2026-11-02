@@ -3,9 +3,22 @@
 
 use std::process::Command;
 
-use mojito_core::{CAPS_USAGE, F18_USAGE};
+use mojito_core::lifecycle::Remap;
 
 pub struct CapsMap;
+
+/// HID usage id in the keyboard page (the hidutil numbering space).
+/// Deliberately a distinct type from `PhysicalKey`: Caps Lock is usage 0x39
+/// and virtual keycode 0x39 by coincidence, but F18 is usage 0x6D and virtual
+/// keycode 0x4F, and conflating the spaces breaks remaps silently.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+pub struct HidUsage(pub u64);
+
+/// HID usages for the hidutil remap. Apple TN2450 encodes a full usage as
+/// (usage_page << 32) | usage, so keyboard-page values are 36-bit: caps lock
+/// is 0x700000039 and F18 is 0x70000006D. u64 on purpose.
+pub const CAPS_USAGE: HidUsage = HidUsage(0x7_0000_0039);
+pub const F18_USAGE: HidUsage = HidUsage(0x7_0000_006D);
 
 /// One UserKeyMapping entry as hidutil reports it.
 ///
@@ -24,15 +37,14 @@ const SRC_KEY: &str = "HIDKeyboardModifierMappingSrc";
 const DST_KEY: &str = "HIDKeyboardModifierMappingDst";
 const AGENT_LABEL: &str = "com.mojito.caps";
 
-impl CapsMap {
+impl Remap for CapsMap {
     /// Merge our entry into the existing UserKeyMapping and set it. Idempotent.
     /// An absent mapping (a fresh machine prints `(null)`) is an empty slate;
     /// a mapping that exists but fails to parse stays an error so foreign
     /// entries are never clobbered.
-    pub fn install(&self) -> Result<(), String> {
-        let merged = merged_or_current()?;
-        hidutil_set(&merged)?;
-        if !contains_pair(&hidutil_get()?, our_pair()) {
+    fn install(&self) -> Result<(), String> {
+        set_mapping(&merged_or_current()?)?;
+        if !contains_pair(&current_mapping()?, OUR_PAIR) {
             return Err("hidutil did not accept the Caps Lock remap".into());
         }
         Ok(())
@@ -41,20 +53,15 @@ impl CapsMap {
     /// Remove only our entry (matched on Src == CAPS_USAGE), bootout the
     /// LaunchAgent, delete the plist. A foreign entry remapping something
     /// else TO F18 survives.
-    pub fn uninstall(&self) -> Result<(), String> {
-        let remaining = without_entry(&hidutil_get()?, CAPS_USAGE.0)?;
-        hidutil_set(&remaining)?;
+    fn uninstall(&self) -> Result<(), String> {
+        set_mapping(&without_entry(&current_mapping()?, CAPS_USAGE.0)?)?;
         bootout_agent();
         delete_plist();
         Ok(())
     }
 
-    /// True when the current UserKeyMapping contains our caps->F18 pair.
-    pub fn is_active(&self) -> bool {
-        match hidutil_get() {
-            Ok(current) => contains_pair(&current, our_pair()),
-            Err(_) => false,
-        }
+    fn is_active(&self) -> bool {
+        current_mapping().is_ok_and(|current| contains_pair(&current, OUR_PAIR))
     }
 
     /// Write and bootstrap the RunAtLoad LaunchAgent so the mapping survives
@@ -62,78 +69,59 @@ impl CapsMap {
     /// carries the merged mapping as of this call, so foreign entries are
     /// replayed too; mappings added after this call are clobbered by the
     /// next login (documented v1 limitation).
-    pub fn ensure_agent(&self) -> Result<(), String> {
+    fn ensure_agent(&self) -> Result<(), String> {
         let plist = agent_plist().ok_or("no home directory; cannot install the LaunchAgent")?;
         if let Some(parent) = plist.parent() {
             std::fs::create_dir_all(parent)
                 .map_err(|error| format!("could not create LaunchAgents: {error}"))?;
         }
-        let mapping = merged_or_current()?;
-        let payload = plist_xml(&mapping);
-        std::fs::write(&plist, payload)
+        std::fs::write(&plist, plist_xml(&merged_or_current()?))
             .map_err(|error| format!("could not write {}: {error}", plist.display()))?;
         let uid = getuid();
-        let label_path = format!("gui/{uid}/{AGENT_LABEL}");
-        let bootstrapped = Command::new("/bin/launchctl")
-            .args(["bootstrap", &format!("gui/{uid}"), &plist.to_string_lossy()])
-            .status()
-            .map_err(|error| format!("could not run launchctl: {error}"))?
-            .success();
-        if !bootstrapped {
-            // Already bootstrapped: kickstart re-runs the mapping set.
-            let kicked = Command::new("/bin/launchctl")
-                .args(["kickstart", "-k", &label_path])
-                .status()
-                .map_err(|error| format!("could not run launchctl: {error}"))?
-                .success();
-            if !kicked {
-                return Err("launchctl could not load the Caps Lock agent".into());
-            }
+        let bootstrapped =
+            launchctl(&["bootstrap", &format!("gui/{uid}"), &plist.to_string_lossy()])?;
+        // Already bootstrapped: kickstart re-runs the mapping set.
+        if !bootstrapped && !launchctl(&["kickstart", "-k", &format!("gui/{uid}/{AGENT_LABEL}")])? {
+            return Err("launchctl could not load the Caps Lock agent".into());
         }
         Ok(())
     }
 }
 
-/// The merged UserKeyMapping as of now. An absent mapping merges into our
-/// pair alone; a mapping that fails to parse stays an error so foreign
-/// entries are never clobbered.
+const OUR_PAIR: (u64, u64) = (CAPS_USAGE.0, F18_USAGE.0);
+
 fn merged_or_current() -> Result<String, String> {
-    merge_mapping(&hidutil_get()?, our_pair())
+    merge_mapping(&current_mapping()?, OUR_PAIR)
 }
 
-fn our_pair() -> (u64, u64) {
-    (CAPS_USAGE.0, F18_USAGE.0)
+fn current_mapping() -> Result<String, String> {
+    hidutil_property("--get", "UserKeyMapping")
 }
 
-/// `hidutil property --get UserKeyMapping`.
-fn hidutil_get() -> Result<String, String> {
+fn set_mapping(mapping: &str) -> Result<(), String> {
+    hidutil_property("--set", &format!(r#"{{"UserKeyMapping":{mapping}}}"#)).map(drop)
+}
+
+fn hidutil_property(flag: &str, value: &str) -> Result<String, String> {
     let output = Command::new("/usr/bin/hidutil")
-        .args(["property", "--get", "UserKeyMapping"])
+        .args(["property", flag, value])
         .output()
         .map_err(|error| format!("could not run hidutil: {error}"))?;
     if !output.status.success() {
         return Err(format!(
-            "hidutil property --get failed: {}",
+            "hidutil property {flag} failed: {}",
             String::from_utf8_lossy(&output.stderr).trim()
         ));
     }
     Ok(String::from_utf8_lossy(&output.stdout).into_owned())
 }
 
-/// `hidutil property --set {"UserKeyMapping": <mapping>}`.
-fn hidutil_set(mapping: &str) -> Result<(), String> {
-    let payload = format!(r#"{{"UserKeyMapping":{mapping}}}"#);
-    let output = Command::new("/usr/bin/hidutil")
-        .args(["property", "--set", &payload])
-        .output()
-        .map_err(|error| format!("could not run hidutil: {error}"))?;
-    if !output.status.success() {
-        return Err(format!(
-            "hidutil property --set failed: {}",
-            String::from_utf8_lossy(&output.stderr).trim()
-        ));
-    }
-    Ok(())
+fn launchctl(args: &[&str]) -> Result<bool, String> {
+    Command::new("/bin/launchctl")
+        .args(args)
+        .status()
+        .map(|status| status.success())
+        .map_err(|error| format!("could not run launchctl: {error}"))
 }
 
 /// Parse the UserKeyMapping entries out of `hidutil property --get` output.
@@ -142,7 +130,7 @@ fn hidutil_set(mapping: &str) -> Result<(), String> {
 /// show JSON with the same keys. An absent mapping prints `(null)` or an
 /// empty string and is an empty slate, not an error. Anything else that
 /// yields no readable entries stays an error so foreign remaps are never
-/// clobbered. Pure; unit-tested against the format observed on-device.
+/// clobbered.
 fn entries_from(text: &str) -> Result<Vec<MappingEntry>, String> {
     let trimmed = text.trim();
     if trimmed.is_empty() || trimmed == "(null)" {
@@ -196,7 +184,7 @@ fn block_value(block: &str, key: &str) -> Option<u64> {
 }
 
 /// Our entries plus the parsed foreign entries as hidutil's `--set` input,
-/// which is JSON on every version we support. Pure; unit-tested.
+/// which is JSON on every version we support.
 fn serialize(entries: &[MappingEntry]) -> String {
     let items: Vec<String> = entries
         .iter()
@@ -205,14 +193,12 @@ fn serialize(entries: &[MappingEntry]) -> String {
     format!("[{}]", items.join(","))
 }
 
-/// Our caps->F18 entry as a JSON object.
 fn entry_json(pair: (u64, u64)) -> String {
     format!(r#""{SRC_KEY}":{},"{DST_KEY}":{}"#, pair.0, pair.1)
 }
 
 /// Merge our caps->F18 entry into the parsed UserKeyMapping: any previous
 /// entry for the same source is replaced, foreign entries survive untouched.
-/// Pure; unit-tested.
 fn merge_mapping(existing: &str, ours: (u64, u64)) -> Result<String, String> {
     let mut entries = entries_from(existing)?;
     entries.retain(|entry| entry.src != ours.0);
@@ -223,14 +209,12 @@ fn merge_mapping(existing: &str, ours: (u64, u64)) -> Result<String, String> {
     Ok(serialize(&entries))
 }
 
-/// Every entry except the one whose Src matches `src`. Pure; unit-tested.
 fn without_entry(existing: &str, src: u64) -> Result<String, String> {
     let mut entries = entries_from(existing)?;
     entries.retain(|entry| entry.src != src);
     Ok(serialize(&entries))
 }
 
-/// True when some entry maps exactly `src -> dst`. Pure; unit-tested.
 fn contains_pair(existing: &str, ours: (u64, u64)) -> bool {
     entries_from(existing).is_ok_and(|entries| {
         entries
@@ -278,10 +262,7 @@ fn plist_xml(mapping: &str) -> String {
 }
 
 fn bootout_agent() {
-    let uid = getuid();
-    let _ = Command::new("/bin/launchctl")
-        .args(["bootout", &format!("gui/{uid}/{AGENT_LABEL}")])
-        .status();
+    let _ = launchctl(&["bootout", &format!("gui/{}/{AGENT_LABEL}", getuid())]);
 }
 
 fn delete_plist() {
@@ -304,6 +285,19 @@ mod tests {
 
     // The real TN2450 encoding: (usage_page << 32) | usage.
     const OURS: (u64, u64) = (0x7_0000_0039, 0x7_0000_006D);
+
+    /// The trap the architecture doc warns about: keycode 0x4F and HID usage
+    /// 0x70000006D both name F18, in different spaces. The TN2450 encoding is
+    /// (usage_page << 32) | usage, so the usage constants are 36-bit.
+    #[test]
+    fn keycode_spaces_are_distinct_and_golden() {
+        assert_eq!(mojito_core::key::META, mojito_core::PhysicalKey(0x4F));
+        assert_eq!(F18_USAGE, HidUsage(0x7_0000_006D));
+        assert_eq!(CAPS_USAGE, HidUsage(0x7_0000_0039));
+        assert_eq!(F18_USAGE.0, 30064771181);
+        assert_eq!(CAPS_USAGE.0, 30064771129);
+        assert_ne!(mojito_core::key::META.0 as u64, F18_USAGE.0);
+    }
 
     /// The on-device discovery that forced these tests: a fresh machine
     /// prints `(null)`, and the first parser treated that as an error, so

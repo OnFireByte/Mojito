@@ -1,6 +1,8 @@
 //! App icons as small CGImages the switcher can show without keeping the
 //! full NSImage representations alive.
 
+use std::collections::HashMap;
+
 use objc2::rc::autoreleasepool;
 use objc2_app_kit::{NSImage, NSRunningApplication, NSWorkspace};
 use objc2_core_foundation::{CFRetained, CGPoint, CGRect, CGSize};
@@ -10,10 +12,28 @@ use objc2_core_graphics::{
 };
 use objc2_foundation::NSString;
 
+const ICON_PIXELS: usize = 48;
+
+/// App icons keyed by bundle id, rendered once per app; `None` caches a
+/// miss so the row keeps its monogram without retrying.
+#[derive(Default)]
+pub struct IconCache {
+    icons: HashMap<String, Option<CFRetained<CGImage>>>,
+}
+
+impl IconCache {
+    pub fn get(&mut self, bundle: &str) -> Option<CFRetained<CGImage>> {
+        self.icons
+            .entry(bundle.to_string())
+            .or_insert_with(|| app_icon(bundle, ICON_PIXELS))
+            .clone()
+    }
+}
+
 /// The app's icon rendered into a `size` x `size` pixel image. The running
 /// instance's icon comes first; the bundle's file icon covers pinned-but-
 /// quit apps. Call on the main thread (AppKit).
-pub fn app_icon(bundle: &str, size: usize) -> Option<CFRetained<CGImage>> {
+fn app_icon(bundle: &str, size: usize) -> Option<CFRetained<CGImage>> {
     autoreleasepool(|_| {
         let bundle = NSString::from_str(bundle);
         let apps = NSRunningApplication::runningApplicationsWithBundleIdentifier(&bundle);

@@ -1,23 +1,22 @@
 //! The three sections' content: pinned apps with trigger capture, behavior
 //! (the switcher trigger, the tap threshold and the key-hint layout picker),
-//! and system
-//! (permissions and the Caps Lock remap).
+//! and system (permissions and the Caps Lock remap).
 
 use rune::{El, PhysicalInput, ScrollSpec, Tx, col, el, icon, row, text};
 use rune_kit::{Badge, BadgeVariant, ButtonVariant, TextInput};
 
 use super::controls::{
-    Choice, METRICS, Paint, banner, button, icon_button, note, pressable_row, pulsing_dot, section,
-    select, setting_row, small_button,
+    Choice, METRICS, Paint, banner, button, icon_button, note, pulsing_dot, section, select,
+    setting_row, small_button,
 };
 use super::{
     CatalogState, PinnedDraft, SettingsState, add_app, add_top_match, capture_input, catalog_key,
-    catalog_matches, choose_layout, choose_trigger, is_pinned, remove_row, start_capture,
-    toggle_remap,
+    catalog_matches, choose_layout, choose_trigger, is_pinned, remove_row, toggle_remap,
 };
 use crate::catalog::CatalogApp;
 use mojito_core::SwitcherTrigger;
-use mojito_macos::permission;
+use mojito_macos::keyboard::layout;
+use mojito_macos::shell::permission;
 
 /// How tall the catalog list may grow before it scrolls inside its card.
 const CATALOG_HEIGHT: f32 = 320.0;
@@ -27,7 +26,7 @@ fn sections(key: &str) -> El {
     col().key(key).gap(METRICS.section_gap)
 }
 
-pub(super) fn apps(s: &SettingsState, p: Paint, _layer: &mut Vec<El>) -> El {
+pub(super) fn apps(s: &SettingsState, p: Paint) -> El {
     sections("apps")
         .children(s.catalog_open.then(|| catalog_card(s, p)))
         .child(pinned_card(s, p))
@@ -50,13 +49,11 @@ pub(super) fn behavior(s: &SettingsState, p: Paint, layer: &mut Vec<El>) -> El {
         ))
 }
 
-pub(super) fn system(s: &SettingsState, p: Paint, _layer: &mut Vec<El>) -> El {
+pub(super) fn system(s: &SettingsState, p: Paint) -> El {
     sections("system")
         .child(permission_card(s, p))
         .child(remap_card(s, p))
 }
-
-// --- Apps -----------------------------------------------------------------
 
 fn pinned_card(s: &SettingsState, p: Paint) -> El {
     let mut rows: Vec<El> = s
@@ -87,32 +84,29 @@ fn pinned_card(s: &SettingsState, p: Paint) -> El {
 /// its trigger; the row is focusable so `on_physical_input` reaches it.
 fn pinned_row(s: &SettingsState, i: usize, r: &PinnedDraft, p: Paint) -> El {
     let capturing = s.capturing == Some(i);
-    pressable_row(
-        row()
-            .key(format!("pin-{i}"))
-            .min_h(METRICS.row_h)
-            .px(METRICS.row_px)
-            .py(8.0)
-            .gaps(10.0, 16.0)
-            .center_y()
-            .focusable(true)
-            .on_press(move |s: &mut SettingsState| start_capture(s, i))
-            .on_physical_input(
-                move |s: &mut SettingsState, ev: &PhysicalInput, _: &mut Tx| {
-                    capture_input(s, i, ev)
-                },
-            )
-            .child(monogram(p, &r.name))
-            .child(label_cell(p, &r.name, Some(r.bundle_id.clone())))
-            .child(trigger_badge(p, capturing, r.glyph))
-            .child(icon_button(
-                p,
-                "remove",
-                &rune_theme_opencode::icons::CLOSE,
-                "Remove",
-                move |s: &mut SettingsState| remove_row(s, i),
-            )),
-    )
+    row()
+        .key(format!("pin-{i}"))
+        .role("toggle")
+        .min_h(METRICS.row_h)
+        .px(METRICS.row_px)
+        .py(8.0)
+        .gaps(10.0, 16.0)
+        .center_y()
+        .focusable(true)
+        .on_press(move |s: &mut SettingsState| s.capturing = Some(i))
+        .on_physical_input(
+            move |s: &mut SettingsState, ev: &PhysicalInput, _: &mut Tx| capture_input(s, i, ev),
+        )
+        .child(monogram(p, &r.name))
+        .child(label_cell(p, &r.name, &r.bundle_id))
+        .child(trigger_badge(p, capturing, r.key.and_then(layout::glyph)))
+        .child(icon_button(
+            p,
+            "remove",
+            &rune_theme_opencode::icons::CLOSE,
+            "Remove",
+            move |s: &mut SettingsState| remove_row(s, i),
+        ))
 }
 
 /// A monogram tile in place of an app icon (icons are a fast-follow).
@@ -133,23 +127,25 @@ fn monogram(p: Paint, name: &str) -> El {
         )
 }
 
-fn label_cell(p: Paint, title: &str, sub: Option<String>) -> El {
-    let mut cell = col().key("label").grow(1.0).min_w(0.0).gap(1.0).child(
-        text(title.to_string())
-            .font(p.k.ty.ui)
-            .color(p.text())
-            .truncate(),
-    );
-    if let Some(sub) = sub {
-        cell = cell.child(
-            text(sub)
+fn label_cell(p: Paint, title: &str, sub: &str) -> El {
+    col()
+        .key("label")
+        .grow(1.0)
+        .min_w(0.0)
+        .gap(1.0)
+        .child(
+            text(title.to_string())
+                .font(p.k.ty.ui)
+                .color(p.text())
+                .truncate(),
+        )
+        .child(
+            text(sub.to_string())
                 .key("sub")
                 .font(p.k.ty.small)
                 .color(p.muted())
                 .truncate(),
-        );
-    }
-    cell
+        )
 }
 
 /// The row's trigger key: the glyph the chosen hint layout spells, or the
@@ -215,7 +211,6 @@ fn catalog_list(s: &SettingsState, p: Paint) -> El {
         );
     }
     let highlight_top = !s.query.text.trim().is_empty();
-    // Bounded height so the page scrolls instead of stretching.
     col().key("catalog").h(CATALOG_HEIGHT).min_h(0.0).child(
         col()
             .w_full()
@@ -290,8 +285,6 @@ fn catalog_row(p: Paint, app: &CatalogApp, pinned: bool, top: bool) -> El {
     item
 }
 
-// --- Behavior -------------------------------------------------------------
-
 fn trigger_name(trigger: SwitcherTrigger) -> &'static str {
     match trigger {
         SwitcherTrigger::CapsE => "Caps Lock + E",
@@ -315,17 +308,14 @@ fn trigger_row(s: &SettingsState, p: Paint, layer: &mut Vec<El>) -> El {
         p,
         "trigger",
         "Open the switcher with",
-        Some(
-            "Hold ⌘ and tap Caps Lock, or hold Caps Lock and press E. Tab flips between pinned and open apps.",
-        ),
+        "Hold ⌘ and tap Caps Lock, or hold Caps Lock and press E. Tab flips between pinned and open apps.",
         select(
             p,
             "trigger",
             trigger_name(s.trigger),
-            s.trigger_menu_open,
             choices,
-            |s: &mut SettingsState| s.trigger_menu_open = !s.trigger_menu_open,
-            |s: &mut SettingsState| s.trigger_menu_open = false,
+            s.trigger_menu_open,
+            |s| &mut s.trigger_menu_open,
             layer,
         ),
     )
@@ -362,7 +352,7 @@ fn tap_row(s: &SettingsState, p: Paint) -> El {
         p,
         "tap",
         "Tap threshold",
-        Some("How long a hold may last and still count as Esc"),
+        "How long a hold may last and still count as Esc",
         stepper,
     )
 }
@@ -385,39 +375,30 @@ fn hint_row(s: &SettingsState, p: Paint, layer: &mut Vec<El>) -> El {
             }),
         }
     }));
-    let label = s.hint_layout.as_ref().map_or_else(
-        || "Follow current layout".to_string(),
-        |id| {
-            s.layouts
-                .iter()
-                .find(|l| &l.id == id)
-                .map_or_else(|| id.clone(), |l| l.name.clone())
-        },
+    let label = choices.iter().find(|c| c.selected).map_or_else(
+        || s.hint_layout.clone().unwrap_or_default(),
+        |c| c.label.clone(),
     );
     setting_row(
         p,
         "hint-layout",
         "Key hint layout",
-        Some("Which installed layout spells the switcher's trigger hints"),
+        "Which installed layout spells the switcher's trigger hints",
         select(
             p,
             "hint-layout",
             &label,
-            s.hint_menu_open,
             choices,
-            |s: &mut SettingsState| s.hint_menu_open = !s.hint_menu_open,
-            |s: &mut SettingsState| s.hint_menu_open = false,
+            s.hint_menu_open,
+            |s| &mut s.hint_menu_open,
             layer,
         ),
     )
 }
 
-// --- System ---------------------------------------------------------------
-
 fn permission_card(s: &SettingsState, p: Paint) -> El {
     let mut rows = Vec::new();
     if !s.perm_ready {
-        // Degraded mode: the engine cannot run, so say so before the rows.
         rows.push(banner(
             p,
             "degraded",
@@ -425,19 +406,11 @@ fn permission_card(s: &SettingsState, p: Paint) -> El {
             p.k.c.warning,
         ));
     }
-    let badge = if s.perm_ready {
-        Badge::new("Ready")
-            .variant(BadgeVariant::Accent)
-            .build(p.k)
-            .key("badge")
-    } else {
-        Badge::new("Needs grant").build(p.k).key("badge")
-    };
     let control = row()
         .key("access-control")
         .gap(8.0)
         .center_y()
-        .child(badge)
+        .child(state_badge(p, s.perm_ready, "Ready", "Needs grant"))
         .children((!s.perm_ready).then(|| {
             button(
                 p,
@@ -451,7 +424,7 @@ fn permission_card(s: &SettingsState, p: Paint) -> El {
         p,
         "accessibility",
         "Accessibility",
-        Some("Watch Caps Lock and move windows between apps"),
+        "Watch Caps Lock and move windows between apps",
         control,
     ));
     if !s.perm_ready {
@@ -459,7 +432,7 @@ fn permission_card(s: &SettingsState, p: Paint) -> El {
             p,
             "stale",
             "Still stuck after granting?",
-            Some("Reset the saved permission and prompt again"),
+            "Reset the saved permission and prompt again",
             small_button(
                 p,
                 "reset",
@@ -473,37 +446,24 @@ fn permission_card(s: &SettingsState, p: Paint) -> El {
 }
 
 fn remap_card(s: &SettingsState, p: Paint) -> El {
-    let badge = if s.remap_active {
-        Badge::new("Installed")
-            .variant(BadgeVariant::Accent)
-            .build(p.k)
-            .key("badge")
+    let installed = s.remap_active;
+    let label = if installed {
+        "Restore Caps Lock"
     } else {
-        Badge::new("Not installed").build(p.k).key("badge")
-    };
-    let action = if s.remap_active {
-        button(
-            p,
-            "remap",
-            "Restore Caps Lock",
-            ButtonVariant::Neutral,
-            |s: &mut SettingsState, _: &mut Tx| toggle_remap(s, false),
-        )
-    } else {
-        button(
-            p,
-            "remap",
-            "Install remap",
-            ButtonVariant::Neutral,
-            |s: &mut SettingsState, _: &mut Tx| toggle_remap(s, true),
-        )
+        "Install remap"
     };
     let control = row()
         .key("remap-control")
         .gap(8.0)
         .center_y()
-        .child(badge)
-        .child(action);
+        .child(state_badge(p, installed, "Installed", "Not installed"))
+        .child(button(
+            p,
+            "remap",
+            label,
+            ButtonVariant::Neutral,
+            move |s, _| toggle_remap(s, !installed),
+        ));
     section(
         p,
         "remap",
@@ -512,8 +472,17 @@ fn remap_card(s: &SettingsState, p: Paint) -> El {
             p,
             "remap-row",
             "Caps Lock → F18",
-            Some("Lets the engine own Caps Lock without touching apps"),
+            "Lets the engine own Caps Lock without touching apps",
             control,
         )],
     )
+}
+
+fn state_badge(p: Paint, ok: bool, on: &str, off: &str) -> El {
+    let (label, variant) = if ok {
+        (on, BadgeVariant::Accent)
+    } else {
+        (off, BadgeVariant::Neutral)
+    };
+    Badge::new(label).variant(variant).build(p.k).key("badge")
 }

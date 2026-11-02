@@ -29,17 +29,12 @@ pub fn display_containing(point: (f64, f64), displays: &[Rect]) -> usize {
 /// centering into negative space.
 pub fn centered_rect(size: (f64, f64), bounds: Rect) -> Rect {
     let (w, h) = (size.0.max(0.0), size.1.max(0.0));
-    let x = if w >= bounds.w {
-        bounds.x
-    } else {
-        bounds.x + (bounds.w - w) * 0.5
-    };
-    let y = if h >= bounds.h {
-        bounds.y
-    } else {
-        bounds.y + (bounds.h - h) * 0.5
-    };
-    Rect { x, y, w, h }
+    Rect {
+        x: bounds.x + ((bounds.w - w) * 0.5).max(0.0),
+        y: bounds.y + ((bounds.h - h) * 0.5).max(0.0),
+        w,
+        h,
+    }
 }
 
 #[cfg(test)]
@@ -94,15 +89,7 @@ mod tests {
 
     #[test]
     fn centered_rect_centers_in_bounds() {
-        let r = centered_rect(
-            (400.0, 300.0),
-            Rect {
-                x: 0.0,
-                y: 0.0,
-                w: 1440.0,
-                h: 900.0,
-            },
-        );
+        let r = centered_rect((400.0, 300.0), PRIMARY);
         assert_eq!(
             r,
             Rect {
@@ -113,15 +100,7 @@ mod tests {
             }
         );
         // Negative-origin display: the card centers in global space.
-        let r = centered_rect(
-            (400.0, 300.0),
-            Rect {
-                x: -1440.0,
-                y: 0.0,
-                w: 1440.0,
-                h: 900.0,
-            },
-        );
+        let r = centered_rect((400.0, 300.0), NEGATIVE_LEFT);
         assert_eq!(
             r,
             Rect {
@@ -135,15 +114,7 @@ mod tests {
 
     #[test]
     fn centered_rect_clamps_oversized_cards() {
-        let r = centered_rect(
-            (2000.0, 100.0),
-            Rect {
-                x: 0.0,
-                y: 0.0,
-                w: 1440.0,
-                h: 900.0,
-            },
-        );
+        let r = centered_rect((2000.0, 100.0), PRIMARY);
         assert_eq!(r.x, 0.0);
         assert_eq!(r.y, 400.0);
         let r = centered_rect(

@@ -10,7 +10,6 @@ use rune_kit::{
     SelectAppearance, StateColors,
 };
 
-/// Row descriptions and secondary copy.
 pub(super) const DESCRIPTION: TextStyle = TextStyle::new(12.0, 440.0).lh(16.0);
 /// The select field's width, enough for "Follow current layout" and layout names.
 const SELECT_WIDTH: f32 = 260.0;
@@ -41,7 +40,6 @@ pub(super) const METRICS: Metrics = Metrics {
     row_h_described: 60.0,
 };
 
-/// Everything a control needs to paint itself.
 #[derive(Clone, Copy)]
 pub(super) struct Paint {
     pub(super) k: &'static Kit,
@@ -79,31 +77,26 @@ pub(super) fn page(key: &str) -> El {
         .gap(METRICS.section_gap)
 }
 
-/// A section label: above its card, on the page's text edge.
-pub(super) fn section_label(p: Paint, title: &str) -> El {
-    text(title.to_string())
-        .key("header")
-        .font(p.k.ty.ui_medium)
-        .color(p.k.c.text_muted)
-}
-
-/// A titled card of rows with hairline separators between them.
 pub(super) fn section(p: Paint, key: &str, title: &str, rows: Vec<El>) -> El {
     col()
         .key(key)
         .gap(METRICS.label_gap)
-        .child(section_label(p, title).mx(METRICS.row_px))
+        .child(
+            text(title.to_string())
+                .key("header")
+                .font(p.k.ty.ui_medium)
+                .color(p.k.c.text_muted)
+                .mx(METRICS.row_px),
+        )
         .child(card(p, format!("{key}-card"), rows))
 }
 
 /// A raised card of rows with hairline separators between them. The card
 /// shares the panel's fill and lifts off it through its elevation.
 pub(super) fn card(p: Paint, key: impl Into<String>, rows: Vec<El>) -> El {
-    let mut surface = col().key(key).fill(p.k.c.bg_base).radius(p.k.radius.lg);
-    for shadow in &p.k.elevation.raised {
-        surface = surface.box_shadow(*shadow);
-    }
-    surface.children(separated(p, rows))
+    let surface = col().key(key).fill(p.k.c.bg_base).radius(p.k.radius.lg);
+    p.k.elevate(surface, &p.k.elevation.raised)
+        .children(separated(p, rows))
 }
 
 fn separated(p: Paint, rows: Vec<El>) -> Vec<El> {
@@ -125,23 +118,12 @@ fn separator(p: Paint, key: String) -> El {
         .fill(p.k.c.border_muted)
 }
 
-/// A setting: title and optional description on the left, its control on the
-/// right. The row never paints a hover fill; only its controls react.
-pub(super) fn setting_row(
-    p: Paint,
-    key: &str,
-    title: &str,
-    description: Option<&str>,
-    control: El,
-) -> El {
-    let height = if description.is_some() {
-        METRICS.row_h_described
-    } else {
-        METRICS.row_h
-    };
+/// A setting: title and description on the left, its control on the right.
+/// The row never paints a hover fill; only its controls react.
+pub(super) fn setting_row(p: Paint, key: &str, title: &str, description: &str, control: El) -> El {
     row()
         .key(key)
-        .min_h(height)
+        .min_h(METRICS.row_h_described)
         .px(METRICS.row_px)
         .py(8.0)
         .gaps(8.0, 24.0)
@@ -162,24 +144,17 @@ pub(super) fn setting_row(
                         .font(p.k.ty.ui)
                         .color(p.text()),
                 )
-                .children(description.map(|copy| {
-                    text(copy.to_string())
+                .child(
+                    text(description.to_string())
                         .key("description")
                         .font(DESCRIPTION)
                         .color(p.muted())
-                        .wrap()
-                })),
+                        .wrap(),
+                ),
         )
         .child(control)
 }
 
-/// A settings row that acts when pressed anywhere. The row itself never
-/// paints a hover or press fill; the controls inside it show the state.
-pub(super) fn pressable_row(row: El) -> El {
-    row.role("toggle")
-}
-
-/// A short note inside a card, between rows.
 pub(super) fn note(key: &str, copy: &str, color: Color) -> El {
     row().key(key).px(METRICS.row_px).py(8.0).child(
         text(copy.to_string())
@@ -223,11 +198,11 @@ pub(super) fn banner(p: Paint, key: &str, copy: &str, tone: StateColors) -> El {
 
 /// A dot for something live, such as a capture in progress.
 pub(super) fn pulsing_dot(color: Color) -> El {
-    status_dot(color).looping(PULSE)
-}
-
-fn status_dot(color: Color) -> El {
-    el().key("dot").size(8.0, 8.0).radius(4.0).fill(color)
+    el().key("dot")
+        .size(8.0, 8.0)
+        .radius(4.0)
+        .fill(color)
+        .looping(PULSE)
 }
 
 /// Breathes between full and this opacity every two seconds.
@@ -252,7 +227,6 @@ pub(super) fn button(
         .key(key)
 }
 
-/// A smaller button for inside a row.
 pub(super) fn small_button(
     p: Paint,
     key: &str,
@@ -270,7 +244,6 @@ pub(super) fn small_button(
         .key(key)
 }
 
-/// An icon-only button for actions inside a row.
 pub(super) fn icon_button(
     p: Paint,
     key: &str,
@@ -286,10 +259,8 @@ pub(super) fn icon_button(
         .key(key)
 }
 
-/// Runs with the transaction, so a choice can save and close at once.
 pub(super) type Choose = Box<dyn Fn(&mut SettingsState, &mut Tx)>;
 
-/// One choice of a [`select`].
 pub(super) struct Choice {
     pub(super) label: String,
     pub(super) selected: bool,
@@ -298,15 +269,13 @@ pub(super) struct Choice {
 
 /// A select field whose choices open in an anchored menu above the page: the
 /// kit's field trigger carrying a `Menu` of checked items.
-#[allow(clippy::too_many_arguments)]
 pub(super) fn select(
     p: Paint,
     key: &str,
     label: &str,
-    open: bool,
     choices: Vec<Choice>,
-    toggle: impl Fn(&mut SettingsState) + 'static,
-    close: impl Fn(&mut SettingsState) + 'static,
+    open: bool,
+    open_flag: fn(&mut SettingsState) -> &mut bool,
     layer: &mut Vec<El>,
 ) -> El {
     let trigger = Select::new::<&str>(format!("{key}-field"), &[])
@@ -314,7 +283,10 @@ pub(super) fn select(
         .width(SELECT_WIDTH)
         .current(Some(label))
         .open(open)
-        .on_toggle(toggle)
+        .on_toggle(move |s: &mut SettingsState| {
+            let open = open_flag(s);
+            *open = !*open;
+        })
         .trigger(p.k);
     let mut menu = Menu::new(format!("{key}-menu"))
         .trigger(trigger)
@@ -322,7 +294,7 @@ pub(super) fn select(
         .gutter(4.0)
         .min_width(SELECT_WIDTH)
         .open(open)
-        .on_close(close);
+        .on_close(move |s: &mut SettingsState| *open_flag(s) = false);
     for choice in choices {
         menu = menu.item(
             MenuItem::new(choice.label)

@@ -14,14 +14,13 @@ use objc2_core_foundation::{
     CFDictionary, CFNotificationCenter, CFNotificationName, CFNotificationSuspensionBehavior,
 };
 
-use crate::abort_on_panic;
-use crate::input_source::{self, InputSource, Scope, kTISNotifySelectedKeyboardInputSourceChanged};
+use super::input_source::{self, InputSource, Scope, kTISNotifySelectedKeyboardInputSourceChanged};
+use crate::{abort_on_panic, lock, main_thread};
 
 /// The keycode -> glyph table of the snapshotted layout; None = no printable
 /// glyph (arrows, F-keys, dead keys).
 type GlyphTable = [Option<char>; 128];
 static TABLE: Mutex<Option<Box<GlyphTable>>> = Mutex::new(None);
-/// The user-chosen display layout, when one is set.
 static SELECTED: Mutex<Option<Box<GlyphTable>>> = Mutex::new(None);
 static OBSERVER_INSTALLED: AtomicBool = AtomicBool::new(false);
 
@@ -51,8 +50,7 @@ unsafe extern "C" {
 /// Snapshot the current layout's keycode-to-glyph table and refresh it on
 /// every later input-source change. Main thread only; call once at startup.
 pub fn snapshot() {
-    let Some(mtm) = MainThreadMarker::new() else {
-        eprintln!("mojito-macos: the layout snapshot requires the main thread");
+    let Some(mtm) = main_thread("the layout snapshot") else {
         return;
     };
     refresh_snapshot(mtm);
@@ -97,8 +95,7 @@ pub fn installed() -> Vec<LayoutInfo> {
 /// Pick which installed layout renders hint glyphs; None follows the
 /// current input source. Main thread only (TIS).
 pub fn set_display_layout(id: Option<String>) {
-    let Some(mtm) = MainThreadMarker::new() else {
-        eprintln!("mojito-macos: set_display_layout requires the main thread");
+    let Some(mtm) = main_thread("set_display_layout") else {
         return;
     };
     let table = id.and_then(|id| {
@@ -125,7 +122,6 @@ fn refresh_snapshot(mtm: MainThreadMarker) {
     }
 }
 
-/// Translate one input source's key layout into a glyph table.
 fn translate_table_from(source: &InputSource) -> Option<Box<GlyphTable>> {
     let layout = source.key_layout_data()?.to_vec();
     let keyboard_type = u32::from(LMGetKbdType());
@@ -192,8 +188,7 @@ fn install_observer() {
     // SAFETY: the observer id is a static, so it outlives the registration;
     // the callback matches CFNotificationCallback, ignores its pointers,
     // aborts instead of unwinding, and only runs on the main thread it was
-    // registered from. The name is an
-    // immutable HIToolbox constant.
+    // registered from. The name is an immutable HIToolbox constant.
     unsafe {
         center.add_observer(
             ptr::from_ref(&OBSERVER_ID).cast(),
@@ -203,8 +198,4 @@ fn install_observer() {
             CFNotificationSuspensionBehavior::DeliverImmediately,
         );
     }
-}
-
-fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
-    mutex.lock().unwrap_or_else(|error| error.into_inner())
 }

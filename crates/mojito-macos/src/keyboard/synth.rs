@@ -7,6 +7,15 @@
 use mojito_core::{ARROW_DOWN, ARROW_LEFT, ARROW_RIGHT, ARROW_UP, PhysicalKey, SynthKey};
 use objc2_core_graphics::{CGEvent, CGEventField, CGEventFlags, CGEventTapLocation};
 
+use super::modifiers;
+
+/// Reserved control keycodes: unassigned on macOS keyboards (hex's
+/// chord-breaker hole and its neighbor). The UI posts unmarked synthetic
+/// keyDowns here to reach the engine, and the tap swallows them.
+pub(crate) const CONTROL: PhysicalKey = PhysicalKey(0x44);
+/// Posts "the settings file changed": the tap turns it into a config reload.
+pub(crate) const CONTROL_RELOAD: PhysicalKey = PhysicalKey(0x46);
+
 /// Marker carried on every synthesized event so the tap never intercepts
 /// its own output ("MOJ1T").
 const SYNTH_MARKER: i64 = 0x004D_4F4A_3154;
@@ -21,7 +30,7 @@ pub fn post(key: &SynthKey) {
     };
     CGEvent::set_flags(
         Some(&event),
-        CGEventFlags(key.flags.0 | native_flags(key.key)),
+        CGEventFlags(modifiers::to_cg(key.flags).0 | native_flags(key.key)),
     );
     CGEvent::set_integer_value_field(
         Some(&event),
@@ -31,25 +40,23 @@ pub fn post(key: &SynthKey) {
     CGEvent::post(CGEventTapLocation::HIDEventTap, Some(&event));
 }
 
-/// Post one key event without the marker. Debug only: the running tap will
-/// interpret it like a physical key.
-pub fn post_raw(code: u16, down: bool) {
-    post_unmarked(code, down);
-}
-
 /// The click-to-cancel control path. Posts an UNMARKED keyDown on the
 /// reserved control keycode so our own tap sees it (marked events are
 /// ignored there), turns it into a cancel, and swallows it before any app
 /// can. Callable from any thread; the tap thread is not required.
 pub fn post_control() {
-    post_unmarked(mojito_core::CONTROL.0, true);
+    post_raw(CONTROL.0, true);
+}
+
+pub fn post_reload() {
+    post_raw(CONTROL_RELOAD.0, true);
 }
 
 pub(crate) fn is_marked(event: &CGEvent) -> bool {
     CGEvent::integer_value_field(Some(event), CGEventField::EventSourceUserData) == SYNTH_MARKER
 }
 
-fn post_unmarked(code: u16, down: bool) {
+pub fn post_raw(code: u16, down: bool) {
     if let Some(event) = CGEvent::new_keyboard_event(None, code, down) {
         CGEvent::post(CGEventTapLocation::HIDEventTap, Some(&event));
     }

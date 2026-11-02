@@ -29,28 +29,34 @@ tap thread                              main thread
 
 | crate | owns | depends on |
 |---|---|---|
-| `mojito-core` | Pure domain: key newtypes, engine state machine, binding tables, label assignment, config model and JSON parsing, overlay placement math, glyph table. No macOS, no rune, no I/O. Everything here runs in `cargo test` on any OS. | serde, arc-swap |
+| `mojito-core` | Pure domain: key newtypes, engine state machine, binding tables, label assignment, config model and JSON parsing, overlay placement math, glyph table, and the lifecycle rules (startup, Accessibility grant wait, Caps remap sync, native Cmd+Tab) behind the `lifecycle::Host` and `lifecycle::Remap` traits. No macOS, no rune, no I/O. Everything here runs in `cargo test` on any OS. | serde, arc-swap |
 | `mojito-macos` | All macOS contact: taps, synthesis, hidutil remap, app index, switching, TIS, permissions, status item, layout glyphs, the switcher panel, app icons. `cfg(target_os = "macos")`. | core, objc2, objc2-foundation, objc2-app-kit, objc2-quartz-core |
-| `mojito` (bin) | Wiring only: NSApplication setup, the main-thread pump from `UiMsg`/`Job` to the switcher and jobs, the rune settings window (child process), packaging entry. | core, macos, dispatch2, rune, rune-kit |
+| `mojito` (bin) | Wiring only: the main-thread pump from `UiMsg`/`Job` to the switcher and jobs, the `lifecycle::Host` implementation over mojito-macos, the rune settings window (child process), packaging entry. No objc2 imports; NSApplication, main-queue dispatch, app icons and the installed-app scan live in `mojito-macos::shell::app` and `mojito-macos::apps::{icons, catalog}`. | core, macos, rune, rune-kit |
 
-Dependency direction: `mojito → {mojito-macos, mojito-core}`; `mojito-macos → mojito-core`; `mojito-core → nothing`. `UiMsg` and `Job` are the only engine/UI crossings. `ModifierFlags` is opaque in core; no CoreGraphics or AX type appears outside `mojito-macos`.
+Dependency direction: `mojito → {mojito-macos, mojito-core}`; `mojito-macos → mojito-core`; `mojito-core → nothing`. `UiMsg` and `Job` are the only engine/UI crossings. `ModifierFlags` carries core-owned bits; `mojito-macos::keyboard::modifiers` translates CGEventFlags into them at the tap and back at synthesis, dropping every non-modifier bit. No CoreGraphics or AX type, and no hidutil or control-keycode constant, appears outside `mojito-macos`.
+
+`PhysicalKey` uses Apple virtual keycodes as Mojito's canonical key numbering on every platform. It is an encoding, not a dependency: macOS delivers it natively, and a future backend translates its own scancodes into it at its tap. Saved configs stay valid across platforms. `META` is the canonical key that engages the meta layer; on macOS the hidutil remap makes Caps Lock arrive as F18, which is that key.
 
 ## Constants (verified, load-bearing)
 
-From the macOS SDK `HIToolbox/Events.h` and the USB HID usage tables. The golden test pins these; the arena's three candidates each had F18 wrong.
+From the macOS SDK `HIToolbox/Events.h` and the USB HID usage tables. The golden test in `mojito-macos::keyboard::caps` pins the cross-space pair; the arena's three candidates each had F18 wrong.
 
 ```rust
-/// CGEvent virtual keycode = physical position, layout-independent.
+// mojito-core::key
+/// Apple virtual keycode = physical position, layout-independent.
 pub struct PhysicalKey(u16);
+pub const META:     PhysicalKey = PhysicalKey(0x4F); // kVK_F18 = 79 (SDK Events.h)
+
+// mojito-macos::keyboard::caps
 /// HID usage in the keyboard page (hidutil world). A different numbering
 /// space from PhysicalKey; the newtypes make a mix-up not compile.
-pub struct HidUsage(u32);
-
-pub const CAPS:     PhysicalKey = PhysicalKey(0x39); // kVK_CapsLock = 57
-pub const F18:      PhysicalKey = PhysicalKey(0x4F); // kVK_F18 = 79 (SDK Events.h)
-pub const CONTROL:  PhysicalKey = PhysicalKey(0x44); // unassigned control keycode
+pub struct HidUsage(u64);
 pub const CAPS_USAGE: HidUsage   = HidUsage(0x700000039);
 pub const F18_USAGE:  HidUsage   = HidUsage(0x70000006D); // 30064771181, TN2450 encoding
+
+// mojito-macos::keyboard::synth
+pub(crate) const CONTROL:        PhysicalKey = PhysicalKey(0x44); // unassigned control keycode
+pub(crate) const CONTROL_RELOAD: PhysicalKey = PhysicalKey(0x46);
 
 // Positions the engine and labels key off (virtual keycodes):
 // h=0x04 j=0x26 k=0x28 l=0x25 i=0x22 m=0x2E esc=0x35 return=0x24
@@ -85,7 +91,7 @@ pub struct Engine {
     ui: Sender<UiMsg>, jobs: Sender<Job>,
 }
 
-/// One F18 press lifecycle. Meta engages eagerly on F18 down (no threshold lag);
+/// One META press lifecycle. Meta engages eagerly on META down (no threshold lag);
 /// Esc is decided at release; no run-loop timers exist anywhere in the engine.
 enum Phase {
     Idle,
@@ -95,16 +101,16 @@ enum Phase {
     /// switch so leftover autorepeats never type into the app we landed on.
     Held { committed: bool },
     /// The switcher is visible and survives meta release; while it shows,
-    /// every bare key is ours. F18 may be up or down.
+    /// every bare key is ours. META may be up or down.
     Overlay { overlay: OverlayPhase, committed: bool },
 }
-enum OverlayPhase { Hidden, Pinned, Live(Box<LiveModel>) }
+enum OverlayPhase { Hidden, Pinned, Live(Arc<[LiveRow]>) }
 ```
-An engine field `meta_down` tracks whether F18 is physically down, because commit and cancel land differently: with meta still held they return to the chord layer (inert when committed), without it they return to transparent Idle.
+An engine field `meta_down` tracks whether META is physically down, because commit and cancel land differently: with meta still held they return to the chord layer (inert when committed), without it they return to transparent Idle.
 enum Route { Undecided, Pass, Swallow }
 
 /// Invariants of Engine::on_event (pure; no I/O; never blocks; O(1) per event):
-/// - F18 is always swallowed. Real caps behavior can never leak (the hidutil
+/// - META is always swallowed. Real caps behavior can never leak (the hidutil
 ///   remap guarantees macOS never sees a Caps Lock event at all).
 /// - Any key event during the hold (including passed modifier chords) sets
 ///   `used = true`, which kills the Esc-on-release. A bare modifier press
@@ -140,16 +146,15 @@ pub enum Chord {
 //            CMD/CTRL/OPT, else swallow).
 // pinned[m]: user trigger keys -> TriggerPin, e and tab -> ToggleMode, esc -> Cancel.
 // Live labels are not a chord: the engine matches the key against the frozen
-// LiveModel rows before consulting the pinned table.
-//            Labels are never in pinned[m]; live labels come from LiveModel.
+// live rows before consulting the pinned table.
+//            Labels are never in pinned[m]; live labels come from the frozen live rows.
 ```
 
 ### Live model and labels
 
 ```rust
-/// Frozen when Live is entered; never mutated during the hold. Labels cannot
-/// reshuffle under the user's fingers.
-pub struct LiveModel { pub rows: Arc<[LiveRow]> }
+/// The rows are frozen when Live is entered and never mutated during the
+/// hold, so labels cannot reshuffle under the user's fingers.
 pub struct LiveRow { pub pid: i32, pub bundle: Option<String>, pub name: String,
                      pub windows: u8, pub label: Option<PhysicalKey> }
 ```
@@ -176,7 +181,7 @@ Assignment is deterministic and injective: walk `LABEL_PRIORITY`, which holds no
 ```rust
 /// Keys no label or pin may ever take. Enforced in config validation AND in
 /// label assignment; single source of truth.
-pub const RESERVED: [PhysicalKey; 4] = [F18, ESC, RETURN, E];
+pub const RESERVED: [PhysicalKey; 4] = [META, ESC, RETURN, E];
 pub struct LabelMemory(BTreeMap<String /*bundle_id*/, PhysicalKey>);
 pub fn assign_labels(rows: &[AppSlot], memory: &LabelMemory, pinned: &[PhysicalKey])
     -> Vec<LiveRow>;
@@ -209,13 +214,12 @@ pub enum UiMsg {
 pub struct PinnedRow { pub key: PhysicalKey, pub name: String, pub glyph: char }
 
 pub enum Job {
-    Switch(SwitchRequest),        // activate + AX raise, on main
+    Switch(AppRef),               // activate + AX raise, on main
     ToggleInputSource,            // TISSelectInputSource, on main (TIS is main-thread-only)
     RefreshWindowCounts,          // CGWindowList counts into AppIndex, on main
     MergeLabels(LabelMemoryPatch) // sticky labels -> disk, debounced
 }
-pub enum AppRef { Pid(i32), Bundle(String), Launch(PathBuf, String) }
-pub struct SwitchRequest { pub app: AppRef }
+pub enum AppRef { Pid(i32), Bundle(String) }
 ```
 
 ## Engine decision table
@@ -237,25 +241,25 @@ The whole UX in one matrix. `route[key]` makes every down decision bind its up; 
 | any other bare key | swallow | swallow | swallow |
 | F18 up | tap within tap_max_ms and !used -> synth Esc; else nothing -> Idle | bare release of a re-press -> HideFade -> Idle; used release -> overlay stays open | overlay stays open |
 
-Commit = `Ui(Hide)` + `Job(Switch)` + `committed = true` while meta is held, or an immediate return to transparent Idle when the overlay was already sticky. Esc cancels with `HideFade`. The overlay is sticky: releasing meta leaves it open, and while it shows the engine owns every bare key; Esc, a selection, the control keycode, or a bare second caps press (F18 re-pressed and released without using a key) closes it with `HideFade` — using any key during that second hold keeps the overlay open instead. Cmd+Tab is decided before the phase table and works from Idle too: it opens the pinned list as a sticky overlay, and pressed again flips modes; the engine cannot see Cmd's release (flagsChanged is never tapped), so a quick Cmd+Tab does not jump to the previous app the way macOS's does. `mojito-macos::native_switcher` turns the native symbolic hotkeys 1 and 2 off through `CGSSetSymbolicHotKeyEnabled` only after the taps are live, restores them on terminate, SIGINT and SIGTERM, and re-syncs on every launch and config reload. Click-to-cancel reaches the engine because the UI posts an unmarked synthetic keyDown on the reserved unassigned `CONTROL` keycode, which the tap swallows and turns into a cancel.
+Commit = `Ui(Hide)` + `Job(Switch)` + `committed = true` while meta is held, or an immediate return to transparent Idle when the overlay was already sticky. Esc cancels with `HideFade`. The overlay is sticky: releasing meta leaves it open, and while it shows the engine owns every bare key; Esc, a selection, the control keycode, or a bare second caps press (F18 re-pressed and released without using a key) closes it with `HideFade` — using any key during that second hold keeps the overlay open instead. Cmd+Tab is decided before the phase table and works from Idle too: it opens the pinned list as a sticky overlay, and pressed again flips modes; the engine cannot see Cmd's release (flagsChanged is never tapped), so a quick Cmd+Tab does not jump to the previous app the way macOS's does. `mojito-macos::shell::native_switcher` turns the native symbolic hotkeys 1 and 2 off through `CGSSetSymbolicHotKeyEnabled` only after the taps are live, restores them on terminate, SIGINT and SIGTERM, and re-syncs on every launch and config reload. Click-to-cancel reaches the engine because the UI posts an unmarked synthetic keyDown on the reserved unassigned `CONTROL` keycode, which the tap swallows and turns into a cancel.
 
 ## macOS backend
 
-- **Taps** (`mojito-macos::taps`): three filter taps on one CFRunLoop thread sharing one callback, one per public tap point. The HID tap sits at `kCGHIDEventTap` with head insertion: the head of the HID chain, because another app's HID-level key filter (iTerm2's hotkey window) otherwise consumes keys before any session tap sees them. The session tap sits at `kCGSessionEventTap`, head-inserted ahead of the system's own session filters (Siri, SiriNCService hold session-level key filters). The annotated-session tap sits at `kCGAnnotatedSessionEventTap`, the last public point before apps. Mask everywhere = keyDown | keyUp. An injected key (Touch-Bar-style Esc, driver-synthesized keys) can enter at any of the three points; together they cover every path a key can take to an app, and one hardware event crosses all three when passed — the engine deduplicates by event identity (key, direction, timestamp) and repeats the first decision without side effects. flagsChanged is never filtered (an active filtering tap there breaks Finder's Option menus even on pass-through). Callbacks never block: pure `on_event` inline, `Synth` posted inline, `Ui`/`Job` over unbounded channels with `try_send` plus a waker poke. A 5 s health timer re-enables taps macOS silently disabled and recreates invalidated ones (any tap's gap is a coverage interruption, so the engine resets), then injects `Reset` so the engine returns to Idle and the overlay hides. App Nap opted out on the tap thread only (`UserInitiatedAllowingIdleSystemSleep`). Readiness over a `sync_channel` with a 2 s timeout; the session and annotated taps failing to create degrades to fewer taps with a log line.
-- **Synthesis** (`mojito-macos::synth`): `CGEventCreateKeyboardEvent` + `CGEventSetFlags` + `CGEventSetIntegerValueField(kCGKeyboardEventIntegerFieldEventSourceUserData = 42, MARKER)` + `CGEventPost(kCGHIDEventTap)`. Marker `0x004D_4F4A_3154` ("MOJ1T"); the tap ignores marked events so we never intercept our own output. No chord-breaker posting: F18 is not a modifier, so no system modifier state is ever held and no app can fire a modifier hotkey on meta. The primitive stays available for a future keycode-57 fallback mode.
-- **Caps remap** (`mojito-macos::caps`): `hidutil property --get UserKeyMapping`, merge our `{src: 0x70000039, dst: 0x7000006D}` entry preserving foreign entries, `--set` (no root needed). Persist with `~/Library/LaunchAgents/com.mojito.caps.plist` (RunAtLoad, runs the same set), loaded via `launchctl bootstrap gui/$(id -u)`. Self-heal: a periodic `is_active()` check reinstalls and badges the status item if the mapping vanished (Sequoia Login-Items consent can disable the agent). Uninstall removes only our entry, matched on `Src == CAPS_USAGE` (a user may remap something else TO F18), boots out the agent, deletes the plist. Capture-off toggle restores stock Caps Lock.
-- **App index** (`mojito-macos::index`): main thread maintains a recency ring of running regular apps from NSWorkspace activation/launch/terminate observations and publishes `ArcSwap<AppIndex>`; `Job::RefreshWindowCounts` adds CGWindowList layer-0 window counts per pid when Pinned mode opens, so they are fresh by the time the user presses e again. The count spans every Space (`kCGWindowListOptionAll` + `kCGWindowListExcludeDesktopElements`, minimized windows included): an on-screen-only count saw one app when the frontmost Space was fullscreen, which emptied the live list. Live list = regular apps with at least one window on any Space, frontmost excluded, recency order. No `kCGWindowName` reads anywhere (it demands Screen Recording permission).
-- **Switching** (`mojito-macos::switch`): every AX call under `AXUIElementSetMessagingTimeout(0.25)` so a hung app cannot stall the gesture. Ladder: resolve pid by bundle id (`NSRunningApplication` lookup, else `NSWorkspace.openApplication` then re-resolve) -> `unhide()` if hidden -> `activate()` -> pick window via AX (`kAXFocusedWindowAttribute` -> `kAXMainWindowAttribute` -> windows[0] -> none) -> `kAXRaiseAction`. AXRaise runs even when `activate()` is refused; both run unconditionally. Degradation: Accessibility denied or no raisable window -> activation-only, and the settings pane says so plainly; switching to a Space with open windows completes the move. Minimized targets: clear `kAXMinimized` before raise.
-- **Input sources** (`mojito-macos::tis`): enabled sources via `TISCreateInputSourceList(null, false)` filtered to keyboard-category and select-capable; the toggle returns to the source that was current before the most recent change (the hardware Caps Lock behavior the remap removes), with the next source in menu order standing in until history exists, via `TISSelectInputSource`, on the main thread only (overlapping TIS calls from worker threads crashed hex, release 2.1.12). The two-most-recent history is process-lifetime and observed at presses; macOS keeps no public record of it.
-- **Permissions** (`mojito-macos::permission`): `CGPreflightPostEventAccess()` (launch-frozen) + `AXIsProcessTrusted()` (live) both checked; prompt via `AXIsProcessTrustedWithOptions(kAXTrustedCheckOptionPrompt: YES)`; 250 ms poll starts the engine the moment the grant lands and stops once granted; still untrusted ~15 s after prompting offers a `tccutil` reset and re-prompt. Input Monitoring is never requested. Accessibility also grants listen-event access.
-- **Status item** (`mojito-macos::status_item`): `NSStatusItem` via objc2 (hex `macos_rune/status_item.rs:46-120` pattern), menu: Settings, Start at Login (SMAppService on a worker thread), Restore Caps Lock, About, Quit. Actions run on the main thread through a callback passed to `install`.
-- **Layout glyphs** (`mojito-macos::layout`): one main-thread snapshot at startup of `UCKeyTranslate` over keycodes 0..128 from `TISCopyCurrentKeyboardLayoutInputSource`, refreshed on the distributed input-source-changed notification; converts `PhysicalKey` to display glyph for badges. TIS access stays behind one mutex and never re-enters from worker threads on a miss.
+- **Taps** (`mojito-macos::keyboard::taps`): three filter taps on one CFRunLoop thread sharing one callback, one per public tap point. The HID tap sits at `kCGHIDEventTap` with head insertion: the head of the HID chain, because another app's HID-level key filter (iTerm2's hotkey window) otherwise consumes keys before any session tap sees them. The session tap sits at `kCGSessionEventTap`, head-inserted ahead of the system's own session filters (Siri, SiriNCService hold session-level key filters). The annotated-session tap sits at `kCGAnnotatedSessionEventTap`, the last public point before apps. Mask everywhere = keyDown | keyUp. An injected key (Touch-Bar-style Esc, driver-synthesized keys) can enter at any of the three points; together they cover every path a key can take to an app, and one hardware event crosses all three when passed — the engine deduplicates by event identity (key, direction, timestamp) and repeats the first decision without side effects. flagsChanged is never filtered (an active filtering tap there breaks Finder's Option menus even on pass-through). Callbacks never block: pure `on_event` inline, `Synth` posted inline, `Ui`/`Job` over unbounded channels with `try_send` plus a waker poke. A 5 s health timer re-enables taps macOS silently disabled and recreates invalidated ones (any tap's gap is a coverage interruption, so the engine resets), then injects `Reset` so the engine returns to Idle and the overlay hides. App Nap opted out on the tap thread only (`UserInitiatedAllowingIdleSystemSleep`). Readiness over a `sync_channel` with a 2 s timeout; the session and annotated taps failing to create degrades to fewer taps with a log line.
+- **Synthesis** (`mojito-macos::keyboard::synth`): `CGEventCreateKeyboardEvent` + `CGEventSetFlags` + `CGEventSetIntegerValueField(kCGKeyboardEventIntegerFieldEventSourceUserData = 42, MARKER)` + `CGEventPost(kCGHIDEventTap)`. Marker `0x004D_4F4A_3154` ("MOJ1T"); the tap ignores marked events so we never intercept our own output. No chord-breaker posting: F18 is not a modifier, so no system modifier state is ever held and no app can fire a modifier hotkey on meta. The primitive stays available for a future keycode-57 fallback mode.
+- **Caps remap** (`mojito-macos::keyboard::caps`): `hidutil property --get UserKeyMapping`, merge our `{src: 0x70000039, dst: 0x7000006D}` entry preserving foreign entries, `--set` (no root needed). Persist with `~/Library/LaunchAgents/com.mojito.caps.plist` (RunAtLoad, runs the same set), loaded via `launchctl bootstrap gui/$(id -u)`. Self-heal: a periodic `is_active()` check reinstalls and badges the status item if the mapping vanished (Sequoia Login-Items consent can disable the agent). Uninstall removes only our entry, matched on `Src == CAPS_USAGE` (a user may remap something else TO F18), boots out the agent, deletes the plist. Capture-off toggle restores stock Caps Lock.
+- **App index** (`mojito-macos::apps::index`): main thread maintains a recency ring of running regular apps from NSWorkspace activation/launch/terminate observations and publishes `ArcSwap<AppIndex>`; `Job::RefreshWindowCounts` adds CGWindowList layer-0 window counts per pid when Pinned mode opens, so they are fresh by the time the user presses e again. The count spans every Space (`kCGWindowListOptionAll` + `kCGWindowListExcludeDesktopElements`, minimized windows included): an on-screen-only count saw one app when the frontmost Space was fullscreen, which emptied the live list. Live list = regular apps with at least one window on any Space, frontmost excluded, recency order. No `kCGWindowName` reads anywhere (it demands Screen Recording permission).
+- **Switching** (`mojito-macos::apps::switch`): every AX call under `AXUIElementSetMessagingTimeout(0.25)` so a hung app cannot stall the gesture. Ladder: resolve pid by bundle id (`NSRunningApplication` lookup, else `NSWorkspace.openApplication` then re-resolve) -> `unhide()` if hidden -> `activate()` -> pick window via AX (`kAXFocusedWindowAttribute` -> `kAXMainWindowAttribute` -> windows[0] -> none) -> `kAXRaiseAction`. AXRaise runs even when `activate()` is refused; both run unconditionally. Degradation: Accessibility denied or no raisable window -> activation-only, and the settings pane says so plainly; switching to a Space with open windows completes the move. Minimized targets: clear `kAXMinimized` before raise.
+- **Input sources** (`mojito-macos::keyboard::tis`): enabled sources via `TISCreateInputSourceList(null, false)` filtered to keyboard-category and select-capable; the toggle returns to the source that was current before the most recent change (the hardware Caps Lock behavior the remap removes), with the next source in menu order standing in until history exists, via `TISSelectInputSource`, on the main thread only (overlapping TIS calls from worker threads crashed hex, release 2.1.12). The two-most-recent history is process-lifetime and observed at presses; macOS keeps no public record of it.
+- **Permissions** (`mojito-macos::shell::permission`): `CGPreflightPostEventAccess()` (launch-frozen) + `AXIsProcessTrusted()` (live) both checked; prompt via `AXIsProcessTrustedWithOptions(kAXTrustedCheckOptionPrompt: YES)`; 250 ms poll starts the engine the moment the grant lands and stops once granted; still untrusted ~15 s after prompting flags the status item, and the settings pane offers a `tccutil` reset and re-prompt. The poll is a main-queue timer driven by `mojito_core::lifecycle::Lifecycle::grant_poll`, which owns these rules and their tests (`crates/mojito-core/tests/lifecycle_tests.rs`). Input Monitoring is never requested. Accessibility also grants listen-event access.
+- **Status item** (`mojito-macos::shell::status_item`): `NSStatusItem` via objc2 (hex `macos_rune/status_item.rs:46-120` pattern), menu: Settings, Start at Login (SMAppService on a worker thread), Restore Caps Lock, About, Quit. Actions run on the main thread through a callback passed to `install`.
+- **Layout glyphs** (`mojito-macos::keyboard::layout`): one main-thread snapshot at startup of `UCKeyTranslate` over keycodes 0..128 from `TISCopyCurrentKeyboardLayoutInputSource`, refreshed on the distributed input-source-changed notification; converts `PhysicalKey` to display glyph for badges. TIS access stays behind one mutex and never re-enters from worker threads on a miss.
 
 ## UI
 
 - App assembly: `NSApplication` with the Accessory policy, status item and taps installed before `run()`. No rune and no Metal in the main process: on Apple GPUs the first render-command encoder in a process allocates about 92 MB of graphics footprint, which put a rune overlay at about 190 MB while shown and 30 MB after. The AppKit panel is composited by the window server and peaks near 12 MB.
-- **Switcher overlay** (`mojito-macos::switcher`): one borderless non-activating `NSPanel` at status-window level, joining all Spaces, created once and ordered out on hide. Each show rebuilds the card from rows (badge glyph | icon or monogram | name | live window count) inside an `NSGlassEffectView` (`NSVisualEffectView` HUD material before macOS 26), places it centered on the display under the pointer (pure math in `mojito_core::geom`), and orders it front without activating. It never takes keys: the tap owns every keystroke. Each row is a `RowView` that accepts the first click on the non-activating panel, highlights on hover, and on click posts the row's own key (pin trigger or live label), so the engine commits a click through the same path as the keystroke; a live row past the label pool has no key and is not clickable. A global mouse-down monitor, installed only while shown, posts the reserved control keycode so a click outside the card cancels. `HideFade` animates alpha and releases the card only if no newer show happened.
-- App icons (`mojito-macos::icons`): rendered once per bundle id into 48 px CGImages and cached, so no full NSImage representation stays alive.
+- **Switcher overlay** (`mojito-macos::shell::switcher`): one borderless non-activating `NSPanel` at status-window level, joining all Spaces, created once and ordered out on hide. Each show rebuilds the card from rows (badge glyph | icon or monogram | name | live window count) inside an `NSGlassEffectView` (`NSVisualEffectView` HUD material before macOS 26), places it centered on the display under the pointer (pure math in `mojito_core::geom`), and orders it front without activating. It never takes keys: the tap owns every keystroke. Each row is a `RowView` that accepts the first click on the non-activating panel, highlights on hover, and on click posts the row's own key (pin trigger or live label), so the engine commits a click through the same path as the keystroke; a live row past the label pool has no key and is not clickable. A global mouse-down monitor, installed only while shown, posts the reserved control keycode so a click outside the card cancels. `HideFade` animates alpha and releases the card only if no newer show happened.
+- App icons (`mojito-macos::apps::icons`): rendered once per bundle id into 48 px CGImages and cached, so no full NSImage representation stays alive.
 - Allocator: `Info.plist` sets `LSEnvironment.MallocSpaceEfficient=1`, which cuts about 3 MB of malloc slack at launch and after shows (measured with `scripts/footprint.py`).
 - **Settings window**: rune, in a `mojito settings` child process so its GPU and view memory return to the system on close; regular window (fixed-size so tiling window managers float it), opened from the status item; activation policy flips Accessory -> Regular while open and back. Panes: pinned apps (add from installed-app catalog scan, assign trigger key, remove), behavior (tap threshold), permissions (live state, open System Settings, degraded-mode banner), remap status (installed/reinstall/restore). Trigger capture happens in the window via `.on_physical_input`: the tap engine passes bare keys through when meta is not held, so the focused settings window receives them; the recorder shows the glyph from the layout snapshot. rune-kit `ShortcutRecorder` is rejected for now: it models modifier chords, and our triggers are bare physical keys.
 - Theme: `rune-theme-opencode` tokens (`theme(dark)`, `FONTS`, `FAMILIES`); no color literals outside the theme; one accent per surface; hover instant; settings rows never hover-fill.
@@ -272,7 +276,7 @@ Pure, `cargo test`, any OS (all in `mojito-core`):
 - Engine golden sequences: tap -> exactly one Esc (down+up); hold+h -> Left down; held h autorepeat -> repeated Left downs, one up at release; meta+shift+h -> shift+Left; meta+enter -> ToggleInput once; meta+e -> ShowPinned; e again -> ShowLive; e again -> Pinned; label -> commit + committed-inert leftovers; release -> Hide; esc -> HideFade; cmd+tab during hold -> Pass and marks used; unbound bare key -> swallow; F18 up stale (> tap_max_ms) -> no Esc; F18 up after a passed chord -> no Esc; route memory: every up obeys its down's decision, including after release; injected Reset from any state -> Idle + Hide; duplicate event (same key, direction, timestamp) repeats the decision with no side effects.
 - Tables: hidden table equals the const spec; pinned table trigger keys win; duplicate trigger keys never yield two TriggerPins; reserved keys never yield chords.
 - Labels: determinism, injectivity, RESERVED skipped (e never assigned), pinned keys skipped, sticky memory honored when free and skipped when taken, priority tier membership pinned, overflow -> unlabeled.
-- Keycode spaces: golden test asserts `F18 = 0x4F`, `F18_USAGE = 0x7000006D`, and that the two constants differ (the trap that killed all three arena candidates).
+- Keycode spaces: golden test in `mojito-macos::keyboard::caps` asserts `META = 0x4F`, `F18_USAGE = 0x7000006D`, and that the two constants differ (the trap that killed all three arena candidates).
 - Config: every recovery rule; duplicate keys first-wins; reserved keys rejected; round-trip.
 - Placement math: display containing a point across scaled and negative-origin displays; centered rect clamped to visible frame.
 

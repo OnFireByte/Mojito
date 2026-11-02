@@ -23,7 +23,7 @@ use std::time::Duration;
 use block2::RcBlock;
 use mojito_core::bridge::{Job, UiMsg};
 use mojito_core::engine::Mono;
-use mojito_core::{Action, Engine, ModifierFlags, PhysicalKey, RawKey};
+use mojito_core::{Action, Engine, PhysicalKey, RawKey};
 use objc2::rc::Retained;
 use objc2::runtime::{NSObjectProtocol, ProtocolObject};
 use objc2_core_foundation::{
@@ -36,8 +36,8 @@ use objc2_core_graphics::{
 };
 use objc2_foundation::{NSActivityOptions, NSProcessInfo, NSString};
 
-use crate::abort_on_panic;
-use crate::synth::{is_marked, post};
+use super::synth::{is_marked, post};
+use crate::{abort_on_panic, lock};
 
 pub struct TapDeps {
     pub engine: Engine,
@@ -46,8 +46,7 @@ pub struct TapDeps {
     /// the pure engine, performs the crossing.
     pub ui: SyncSender<UiMsg>,
     pub jobs: SyncSender<Job>,
-    pub ui_wake: Box<dyn Fn() + Send>,
-    pub job_wake: Box<dyn Fn() + Send>,
+    pub wake: Box<dyn Fn() + Send>,
 }
 
 const KEY_MASK: CGEventMask = mask_of(CGEventType::KeyDown) | mask_of(CGEventType::KeyUp);
@@ -62,19 +61,9 @@ const fn mask_of(event_type: CGEventType) -> CGEventMask {
     1 << event_type.0
 }
 
-type TapCallback = unsafe extern "C-unwind" fn(
-    CGEventTapProxy,
-    CGEventType,
-    NonNull<CGEvent>,
-    *mut c_void,
-) -> *mut CGEvent;
-
 struct TapSpec {
     name: &'static str,
     location: CGEventTapLocation,
-    options: CGEventTapOptions,
-    mask: CGEventMask,
-    callback: TapCallback,
     required: bool,
 }
 
@@ -82,25 +71,16 @@ const TAP_SPECS: [TapSpec; 3] = [
     TapSpec {
         name: "HID",
         location: CGEventTapLocation::HIDEventTap,
-        options: CGEventTapOptions::Default,
-        mask: KEY_MASK,
-        callback: on_key_event,
         required: true,
     },
     TapSpec {
         name: "session",
         location: CGEventTapLocation::SessionEventTap,
-        options: CGEventTapOptions::Default,
-        mask: KEY_MASK,
-        callback: on_key_event,
         required: false,
     },
     TapSpec {
         name: "annotated session",
         location: CGEventTapLocation::AnnotatedSessionEventTap,
-        options: CGEventTapOptions::Default,
-        mask: KEY_MASK,
-        callback: on_key_event,
         required: false,
     },
 ];
@@ -109,11 +89,7 @@ const TAP_SPECS: [TapSpec; 3] = [
 /// this one thread, so thread-locals are sound and keep the engine access
 /// free of unsafe pointer plumbing.
 struct TapThread {
-    engine: Engine,
-    ui: SyncSender<UiMsg>,
-    jobs: SyncSender<Job>,
-    ui_wake: Box<dyn Fn() + Send>,
-    job_wake: Box<dyn Fn() + Send>,
+    deps: TapDeps,
     taps: Vec<Tap>,
 }
 
@@ -196,14 +172,7 @@ fn run(deps: TapDeps, ready: SyncSender<Result<(), String>>) {
             failing: false,
         });
     }
-    TAP_THREAD.set(Some(TapThread {
-        engine: deps.engine,
-        ui: deps.ui,
-        jobs: deps.jobs,
-        ui_wake: deps.ui_wake,
-        job_wake: deps.job_wake,
-        taps,
-    }));
+    TAP_THREAD.set(Some(TapThread { deps, taps }));
 
     let _health = HealthTimer::start(&run_loop);
     let _app_nap = AppNapOptOut::begin();
@@ -214,9 +183,6 @@ fn run(deps: TapDeps, ready: SyncSender<Result<(), String>>) {
     TAP_THREAD.take();
 }
 
-/// The filtering callback. Marker check first, then RawKey, then the engine.
-/// Only keyDown|keyUp arrive: flagsChanged is not in the mask (an active
-/// filtering tap there breaks Finder's Option menus even on pass-through).
 unsafe extern "C-unwind" fn on_key_event(
     _proxy: CGEventTapProxy,
     event_type: CGEventType,
@@ -235,7 +201,10 @@ unsafe extern "C-unwind" fn on_key_event(
 }
 
 fn handle_key_event(event_type: CGEventType, event: &CGEvent) -> bool {
-    if is_tap_disabled(event_type) {
+    if matches!(
+        event_type,
+        CGEventType::TapDisabledByTimeout | CGEventType::TapDisabledByUserInput
+    ) {
         with_tap_thread(|tap| {
             if tap.reenable_all() {
                 tap.reset_engine();
@@ -249,39 +218,31 @@ fn handle_key_event(event_type: CGEventType, event: &CGEvent) -> bool {
     }
     let raw = raw_from(event, is_down);
     with_tap_thread(|tap| {
-        if is_down && raw.key == mojito_core::CONTROL {
+        if is_down && raw.key == super::synth::CONTROL {
             // The UI's click-to-cancel control path: cancel through the
             // engine, then swallow the event so no app ever sees it.
-            let actions = tap.engine.cancel_overlay();
+            let actions = tap.deps.engine.cancel_overlay();
             tap.perform(actions);
             return false;
         }
-        if is_down && raw.key == mojito_core::CONTROL_RELOAD {
+        if is_down && raw.key == super::synth::CONTROL_RELOAD {
             // The settings process's save signal: reload the config on main.
             tap.send_job(Job::ReloadConfig);
             return false;
         }
-        let actions = tap.engine.on_event(raw);
+        let actions = tap.deps.engine.on_event(raw);
         tap.perform(actions)
     })
     .unwrap_or(true)
 }
 
-fn is_tap_disabled(event_type: CGEventType) -> bool {
-    matches!(
-        event_type,
-        CGEventType::TapDisabledByTimeout | CGEventType::TapDisabledByUserInput
-    )
-}
-
-/// Backend conversion: a CGEvent into the engine's raw input.
 fn raw_from(event: &CGEvent, down: bool) -> RawKey {
     let field = |field| CGEvent::integer_value_field(Some(event), field);
     RawKey {
         key: PhysicalKey(field(CGEventField::KeyboardEventKeycode) as u16),
         down,
         repeat: field(CGEventField::KeyboardEventAutorepeat) != 0,
-        flags: ModifierFlags(CGEvent::flags(Some(event)).0),
+        flags: super::modifiers::from_cg(CGEvent::flags(Some(event))),
         t: event_mono(CGEvent::timestamp(Some(event))),
     }
 }
@@ -316,7 +277,6 @@ unsafe extern "C" {
     safe fn mach_timebase_info(info: &mut MachTimebaseInfo) -> i32;
 }
 
-/// Monotonic nanoseconds since boot (the Mach clock scaled by its timebase).
 fn now_ns() -> u64 {
     ticks_to_ns(mach_absolute_time())
 }
@@ -345,7 +305,7 @@ impl TapThread {
                 Action::Pass => pass = true,
                 Action::Swallow => pass = false,
                 Action::Synth(key) => post(&key),
-                Action::Ui(msg) => send_and_wake(&self.ui, msg, &self.ui_wake),
+                Action::Ui(msg) => send_and_wake(&self.deps.ui, msg, &self.deps.wake),
                 Action::Job(job) => self.send_job(job),
             }
         }
@@ -353,15 +313,14 @@ impl TapThread {
     }
 
     fn send_job(&self, job: Job) {
-        send_and_wake(&self.jobs, job, &self.job_wake);
+        send_and_wake(&self.deps.jobs, job, &self.deps.wake);
     }
 
     fn reset_engine(&mut self) {
-        let actions = self.engine.reset();
+        let actions = self.deps.engine.reset();
         self.perform(actions);
     }
 
-    /// Re-enable all taps after macOS disabled one without notice.
     fn reenable_all(&mut self) -> bool {
         let mut reenabled = false;
         for attached in self.taps.iter().filter_map(|tap| tap.attached.as_ref()) {
@@ -445,7 +404,6 @@ impl Tap {
     }
 }
 
-/// One attached tap plus its run-loop source, detached on drop.
 struct Attached {
     port: CFRetained<CFMachPort>,
     source: CFRetained<CFRunLoopSource>,
@@ -454,16 +412,16 @@ struct Attached {
 
 impl Attached {
     fn create(spec: &TapSpec, run_loop: &CFRunLoop) -> Result<Self, &'static str> {
-        // SAFETY: both callbacks match CGEventTapCallBack, abort instead of
-        // unwinding into CoreGraphics, and ignore `user_info`, so null is a
-        // valid value; all their state is in the tap thread's thread-local.
+        // SAFETY: the callback matches CGEventTapCallBack, aborts instead of
+        // unwinding into CoreGraphics, and ignores `user_info`, so null is a
+        // valid value; all its state is in the tap thread's thread-local.
         let port = unsafe {
             CGEvent::tap_create(
                 spec.location,
                 CGEventTapPlacement::HeadInsertEventTap,
-                spec.options,
-                spec.mask,
-                Some(spec.callback),
+                CGEventTapOptions::Default,
+                KEY_MASK,
+                Some(on_key_event),
                 ptr::null_mut(),
             )
         }
@@ -494,7 +452,6 @@ fn common_modes() -> Option<&'static CFRunLoopMode> {
     unsafe { kCFRunLoopCommonModes }
 }
 
-/// The repeating run-loop timer that runs `TapThread::check_health`.
 struct HealthTimer(CFRetained<CFRunLoopTimer>);
 
 impl HealthTimer {
@@ -551,8 +508,4 @@ impl Drop for AppNapOptOut {
         // and is ended exactly once, here.
         unsafe { NSProcessInfo::processInfo().endActivity(&self.0) };
     }
-}
-
-fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
-    mutex.lock().unwrap_or_else(|error| error.into_inner())
 }

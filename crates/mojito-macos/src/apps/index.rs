@@ -11,13 +11,14 @@ use objc2::MainThreadMarker;
 use objc2::rc::Retained;
 use objc2::runtime::{NSObjectProtocol, ProtocolObject};
 use objc2_app_kit::{NSApplicationActivationPolicy, NSRunningApplication, NSWorkspace};
-use objc2_core_foundation::{
-    CFArray, CFDictionary, CFNumber, CFRetained, CFString, CFType, ConcreteType,
-};
+use objc2_core_foundation::{CFArray, CFNumber, CFRetained, CFString};
 use objc2_core_graphics::{CGWindowListCopyWindowInfo, CGWindowListOption};
 use objc2_foundation::{NSNotification, NSString};
 
 use mojito_core::bridge::{AppIndex, AppSlot};
+
+use crate::cf::{cf_dicts, cf_get};
+use crate::{lock, main_thread};
 
 type Observer = Retained<ProtocolObject<dyn NSObjectProtocol>>;
 
@@ -38,11 +39,12 @@ unsafe extern "C" {
     ) -> Option<NonNull<CFArray>>;
 }
 
+#[derive(Default)]
 pub struct AppIndexHandle {
     current: Arc<ArcSwap<AppIndex>>,
     /// Recency-ordered regular running apps, most recently touched first.
     /// Only the main thread touches it.
-    ring: Arc<Mutex<Vec<AppSlot>>>,
+    ring: Arc<Mutex<RecencyRing>>,
     /// NSWorkspace block observers; alive for the process lifetime.
     observers: Mutex<Vec<Observer>>,
 }
@@ -54,21 +56,7 @@ enum Kind {
     Terminate,
 }
 
-impl Default for AppIndexHandle {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
 impl AppIndexHandle {
-    pub fn new() -> Self {
-        Self {
-            current: Arc::new(ArcSwap::from_pointee(AppIndex::default())),
-            ring: Arc::new(Mutex::new(Vec::new())),
-            observers: Mutex::new(Vec::new()),
-        }
-    }
-
     pub fn handle(&self) -> Arc<ArcSwap<AppIndex>> {
         self.current.clone()
     }
@@ -76,11 +64,10 @@ impl AppIndexHandle {
     /// Install NSWorkspace observers (activate/launch/terminate) and refresh
     /// the ring. Runs on the main thread.
     pub fn start(&self) {
-        if MainThreadMarker::new().is_none() {
-            eprintln!("mojito-macos: the app index requires the main thread");
+        if main_thread("the app index").is_none() {
             return;
         }
-        seed_ring(&mut self.ring.lock().unwrap_or_else(|error| error.into_inner()));
+        lock(&self.ring).seed(running_regular_apps(), frontmost_pid());
         publish(&self.current, &self.ring);
 
         let center = NSWorkspace::sharedWorkspace().notificationCenter();
@@ -116,71 +103,90 @@ impl AppIndexHandle {
             let observer = unsafe {
                 center.addObserverForName_object_queue_usingBlock(Some(name), None, None, &block)
             };
-            self.observers
-                .lock()
-                .unwrap_or_else(|error| error.into_inner())
-                .push(observer);
+            lock(&self.observers).push(observer);
         }
     }
 
     /// CGWindowList layer-0 on-screen window counts per pid, merged into the
     /// published index. No kCGWindowName reads.
     pub fn refresh_window_counts(&self) {
-        if MainThreadMarker::new().is_none() {
-            eprintln!("mojito-macos: window counts require the main thread");
+        if main_thread("the window count refresh").is_none() {
             return;
         }
-        let counts = window_counts();
-        {
-            let mut ring = self.ring.lock().unwrap_or_else(|error| error.into_inner());
-            for slot in ring.iter_mut() {
-                slot.windows = counts.get(&slot.pid).copied().unwrap_or(0);
-            }
-        }
+        lock(&self.ring).set_window_counts(&window_counts());
         publish(&self.current, &self.ring);
     }
 }
 
-/// Snapshot the ring into the published index, flagging the frontmost app.
-fn publish(current: &Arc<ArcSwap<AppIndex>>, ring: &Mutex<Vec<AppSlot>>) {
-    let frontmost = NSWorkspace::sharedWorkspace()
-        .frontmostApplication()
-        .map(|app| app.processIdentifier());
-    let mut index = AppIndex::default();
-    let mut ring = ring.lock().unwrap_or_else(|error| error.into_inner());
-    for slot in ring.iter_mut() {
-        slot.is_frontmost = frontmost.is_some_and(|pid| pid == slot.pid);
-    }
-    index.slots.clone_from(&ring);
-    drop(ring);
-    current.store(Arc::new(index));
+#[derive(Default)]
+struct RecencyRing {
+    slots: Vec<AppSlot>,
 }
 
-/// Seed the recency ring from the current running applications, frontmost
-/// first (recency is unknown at launch; activation notifications take over).
-fn seed_ring(ring: &mut Vec<AppSlot>) {
-    let workspace = NSWorkspace::sharedWorkspace();
-    let frontmost = workspace
-        .frontmostApplication()
-        .map(|app| app.processIdentifier());
-    ring.clear();
-    let mut others = Vec::new();
-    for app in workspace.runningApplications().to_vec() {
-        if app.isTerminated() || app.activationPolicy() != NSApplicationActivationPolicy::Regular {
-            continue;
-        }
-        let slot = slot_for(&app);
-        if frontmost.is_some_and(|pid| pid == slot.pid) {
-            ring.push(slot);
-        } else {
-            others.push(slot);
-        }
-    }
-    ring.extend(others);
+enum RingEvent {
+    Touched(AppSlot),
+    Gone(i32),
 }
 
-fn slot_for(app: &NSRunningApplication) -> AppSlot {
-    AppSlot {
+impl RecencyRing {
+    fn seed(&mut self, apps: Vec<AppSlot>, frontmost: Option<i32>) {
+        let (front, others): (Vec<AppSlot>, Vec<AppSlot>) = apps
+            .into_iter()
+            .partition(|slot| Some(slot.pid) == frontmost);
+        self.slots = front.into_iter().chain(others).collect();
+    }
+
+    fn apply(&mut self, event: RingEvent) {
+        match event {
+            RingEvent::Gone(pid) => self.slots.retain(|slot| slot.pid != pid),
+            RingEvent::Touched(slot) => {
+                self.slots.retain(|existing| existing.pid != slot.pid);
+                self.slots.insert(0, slot);
+            }
+        }
+    }
+
+    fn set_window_counts(&mut self, counts: &HashMap<i32, u8>) {
+        for slot in &mut self.slots {
+            slot.windows = counts.get(&slot.pid).copied().unwrap_or(0);
+        }
+    }
+
+    fn snapshot(&self, frontmost: Option<i32>) -> AppIndex {
+        let slots = self
+            .slots
+            .iter()
+            .map(|slot| AppSlot {
+                is_frontmost: Some(slot.pid) == frontmost,
+                ..slot.clone()
+            })
+            .collect();
+        AppIndex { slots }
+    }
+}
+
+fn publish(current: &Arc<ArcSwap<AppIndex>>, ring: &Mutex<RecencyRing>) {
+    current.store(Arc::new(lock(ring).snapshot(frontmost_pid())));
+}
+
+fn frontmost_pid() -> Option<i32> {
+    NSWorkspace::sharedWorkspace()
+        .frontmostApplication()
+        .map(|app| app.processIdentifier())
+}
+
+fn running_regular_apps() -> Vec<AppSlot> {
+    NSWorkspace::sharedWorkspace()
+        .runningApplications()
+        .to_vec()
+        .iter()
+        .filter(|app| !app.isTerminated())
+        .filter_map(|app| regular_slot(app))
+        .collect()
+}
+
+fn regular_slot(app: &NSRunningApplication) -> Option<AppSlot> {
+    (app.activationPolicy() == NSApplicationActivationPolicy::Regular).then(|| AppSlot {
         pid: app.processIdentifier(),
         bundle_id: app.bundleIdentifier().map(|id| id.to_string()),
         name: app
@@ -190,14 +196,14 @@ fn slot_for(app: &NSRunningApplication) -> AppSlot {
             .unwrap_or_else(|| "Unknown app".into()),
         windows: 0,
         is_frontmost: false,
-    }
+    })
 }
 
 /// Move the observed app to the front of the ring (or drop it on terminate)
 /// and republish. NSWorkspace notifications arrive on the main thread.
 fn observe(
     current: &Arc<ArcSwap<AppIndex>>,
-    ring: &Mutex<Vec<AppSlot>>,
+    ring: &Mutex<RecencyRing>,
     kind: Kind,
     note: &NSNotification,
 ) {
@@ -207,19 +213,12 @@ fn observe(
     let Some(app) = observed_app(note) else {
         return;
     };
-    {
-        let mut ring = ring.lock().unwrap_or_else(|error| error.into_inner());
-        match kind {
-            Kind::Terminate => ring.retain(|slot| slot.pid != app.processIdentifier()),
-            Kind::Activate | Kind::Launch => {
-                // Only regular apps belong in the switcher ring.
-                if app.activationPolicy() == NSApplicationActivationPolicy::Regular {
-                    let slot = slot_for(&app);
-                    ring.retain(|existing| existing.pid != slot.pid);
-                    ring.insert(0, slot);
-                }
-            }
-        }
+    let event = match kind {
+        Kind::Terminate => Some(RingEvent::Gone(app.processIdentifier())),
+        Kind::Activate | Kind::Launch => regular_slot(&app).map(RingEvent::Touched),
+    };
+    if let Some(event) = event {
+        lock(ring).apply(event);
     }
     publish(current, ring);
 }
@@ -242,38 +241,21 @@ pub(crate) struct WindowInfo {
 
 pub(crate) fn window_infos(option: CGWindowListOption) -> Option<Vec<WindowInfo>> {
     let list = CGWindowListCopyWindowInfo(option, 0)?;
-    // SAFETY: every element of a CFArray is a CFType; each one is
-    // type-checked with `downcast` before use.
-    let list = unsafe { CFRetained::cast_unchecked::<CFArray<CFType>>(list) };
-    let infos = list
+    let infos = cf_dicts(list)
         .iter()
-        .filter_map(|entry| entry.downcast::<CFDictionary>().ok())
         .map(|dict| {
-            // SAFETY: window info dictionaries are keyed by CFStrings; lookups
-            // only hash and compare keys, and every value is type-checked.
-            let dict =
-                unsafe { CFRetained::cast_unchecked::<CFDictionary<CFString, CFType>>(dict) };
-            let number = |key| dict_value::<CFNumber>(&dict, key);
+            let number = |key| cf_get::<CFNumber>(dict, key);
             WindowInfo {
                 pid: number("kCGWindowOwnerPID").and_then(|n| n.as_i64()),
                 number: number("kCGWindowNumber").and_then(|n| n.as_i64()),
                 layer: number("kCGWindowLayer").and_then(|n| n.as_i64()),
                 alpha: number("kCGWindowAlpha").and_then(|n| n.as_f64()),
-                owner_name: dict_value::<CFString>(&dict, "kCGWindowOwnerName")
+                owner_name: cf_get::<CFString>(dict, "kCGWindowOwnerName")
                     .map(|name| name.to_string()),
             }
         })
         .collect();
     Some(infos)
-}
-
-fn dict_value<T: ConcreteType>(
-    dict: &CFDictionary<CFString, CFType>,
-    key: &'static str,
-) -> Option<CFRetained<T>> {
-    dict.get(&CFString::from_static_str(key))?
-        .downcast::<T>()
-        .ok()
 }
 
 /// Layer-0 window counts keyed by owning pid. Minimized windows still
@@ -310,4 +292,80 @@ fn is_on_a_space(connection: i32, window_id: i64) -> bool {
             .map(|raw| CFRetained::from_raw(raw))
     };
     spaces.is_some_and(|spaces| !spaces.is_empty())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn slot(pid: i32) -> AppSlot {
+        AppSlot {
+            pid,
+            bundle_id: Some(format!("com.test.{pid}")),
+            name: format!("app{pid}"),
+            windows: 0,
+            is_frontmost: false,
+        }
+    }
+
+    fn order(ring: &RecencyRing) -> Vec<i32> {
+        ring.snapshot(None)
+            .slots
+            .iter()
+            .map(|slot| slot.pid)
+            .collect()
+    }
+
+    #[test]
+    fn seed_puts_the_frontmost_app_first_and_keeps_the_rest_in_order() {
+        let mut ring = RecencyRing::default();
+        ring.seed(vec![slot(1), slot(2), slot(3)], Some(2));
+        assert_eq!(order(&ring), vec![2, 1, 3]);
+    }
+
+    #[test]
+    fn a_touched_app_moves_to_the_front_without_a_duplicate() {
+        let mut ring = RecencyRing::default();
+        ring.seed(vec![slot(1), slot(2), slot(3)], None);
+        ring.apply(RingEvent::Touched(slot(3)));
+        ring.apply(RingEvent::Touched(slot(4)));
+        assert_eq!(order(&ring), vec![4, 3, 1, 2]);
+    }
+
+    #[test]
+    fn a_gone_app_leaves_the_ring() {
+        let mut ring = RecencyRing::default();
+        ring.seed(vec![slot(1), slot(2)], None);
+        ring.apply(RingEvent::Gone(1));
+        ring.apply(RingEvent::Gone(9));
+        assert_eq!(order(&ring), vec![2]);
+    }
+
+    #[test]
+    fn window_counts_land_on_their_pid_and_absent_pids_read_zero() {
+        let mut ring = RecencyRing::default();
+        ring.seed(vec![slot(1), slot(2)], None);
+        ring.set_window_counts(&HashMap::from([(1, 3)]));
+        ring.set_window_counts(&HashMap::from([(2, 2)]));
+        let windows: Vec<u8> = ring
+            .snapshot(None)
+            .slots
+            .iter()
+            .map(|s| s.windows)
+            .collect();
+        assert_eq!(windows, vec![0, 2]);
+    }
+
+    #[test]
+    fn the_snapshot_flags_only_the_frontmost_app() {
+        let mut ring = RecencyRing::default();
+        ring.seed(vec![slot(1), slot(2)], None);
+        let flags: Vec<bool> = ring
+            .snapshot(Some(2))
+            .slots
+            .iter()
+            .map(|s| s.is_frontmost)
+            .collect();
+        assert_eq!(flags, vec![false, true]);
+    }
 }

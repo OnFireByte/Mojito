@@ -7,10 +7,8 @@
 use mojito_core::PhysicalKey;
 use rune::PhysicalKeyCode as Code;
 
-/// The virtual keycode for `key`, or None when it cannot be a trigger.
 pub fn physical(key: Code) -> Option<PhysicalKey> {
     let code = match key {
-        // Home row and neighbours, QWERTY positions.
         Code::KeyA => 0x00,
         Code::KeyS => 0x01,
         Code::KeyD => 0x02,
@@ -37,7 +35,6 @@ pub fn physical(key: Code) -> Option<PhysicalKey> {
         Code::KeyK => 0x28,
         Code::KeyN => 0x2D,
         Code::KeyM => 0x2E,
-        // Digits, in Events.h's scattered order.
         Code::Digit1 => 0x12,
         Code::Digit2 => 0x13,
         Code::Digit3 => 0x14,
@@ -48,7 +45,6 @@ pub fn physical(key: Code) -> Option<PhysicalKey> {
         Code::Digit8 => 0x1C,
         Code::Digit9 => 0x19,
         Code::Digit0 => 0x1D,
-        // Punctuation.
         Code::Equal => 0x18,
         Code::Minus => 0x1B,
         Code::BracketRight => 0x1E,
@@ -60,7 +56,6 @@ pub fn physical(key: Code) -> Option<PhysicalKey> {
         Code::Slash => 0x2C,
         Code::Period => 0x2F,
         Code::Backquote => 0x32,
-        // Control keys a trigger may reasonably take.
         Code::Space => 0x31,
         Code::Tab => 0x30,
         Code::Backspace => 0x33,
@@ -75,7 +70,6 @@ pub fn physical(key: Code) -> Option<PhysicalKey> {
         Code::End => 0x77,
         Code::PageUp => 0x74,
         Code::PageDown => 0x79,
-        // Function keys.
         Code::F1 => 0x7A,
         Code::F2 => 0x78,
         Code::F3 => 0x63,
@@ -95,7 +89,6 @@ pub fn physical(key: Code) -> Option<PhysicalKey> {
         Code::F17 => 0x40,
         Code::F19 => 0x50,
         Code::F20 => 0x5A,
-        // Keypad.
         Code::Numpad0 => 0x52,
         Code::Numpad1 => 0x53,
         Code::Numpad2 => 0x54,

@@ -2,9 +2,9 @@
 //! decisions and actions. Runs inline in the tap callback; never does I/O and
 //! never blocks.
 
-use crate::bridge::{AppRef, Job, LiveModel, LiveRow, PinnedRow, SwitchRequest, UiMsg};
+use crate::bridge::{AppRef, Job, LiveRow, PinnedRow, UiMsg};
 use crate::config::Config;
-use crate::key::{ESC, F18, ModifierFlags, PhysicalKey, TAB};
+use crate::key::{ESC, META, ModifierFlags, PhysicalKey, TAB};
 use crate::labels::LabelMemory;
 use crate::tables::{Chord, Tables, build_tables};
 use arc_swap::ArcSwap;
@@ -21,7 +21,6 @@ impl Mono {
     }
 }
 
-/// What the tap observed, pre-decision.
 #[derive(Clone, Copy, Debug)]
 pub struct RawKey {
     pub key: PhysicalKey,
@@ -42,7 +41,7 @@ pub struct SynthKey {
 }
 
 /// The engine's whole output. Pass/Swallow decide the event's fate; the rest
-/// execute. Invariant: `on_event` never does I/O and never blocks.
+/// execute.
 #[derive(Debug, PartialEq)]
 pub enum Action {
     Pass,
@@ -52,7 +51,7 @@ pub enum Action {
     Job(Job),
 }
 
-/// One F18 press lifecycle. Meta engages eagerly on F18 down; Esc is decided
+/// One META press lifecycle. Meta engages eagerly on META down; Esc is decided
 /// at release; no timers exist anywhere in the engine.
 #[derive(Debug)]
 enum Phase {
@@ -68,7 +67,7 @@ enum Phase {
         committed: bool,
     },
     /// The switcher is visible and survives meta release: while it shows,
-    /// every bare key is ours. F18 may be up or down under this phase.
+    /// every bare key is ours. META may be up or down under this phase.
     /// `rearm` is a second meta press over the open overlay, holding whether
     /// a key was used under it: a bare release dismisses the overlay, a used
     /// one keeps it. `via_cmd` marks an overlay Cmd+Tab opened or toggled:
@@ -85,7 +84,7 @@ enum Phase {
 #[derive(Debug)]
 enum OverlayPhase {
     Pinned,
-    Live(Box<LiveModel>),
+    Live(Arc<[LiveRow]>),
 }
 
 /// Per-hold decision memory for each physical key: down decides, up obeys.
@@ -110,12 +109,16 @@ enum Layer {
 
 /// Flags that turn an unbound key into a system chord: such keys pass through
 /// a hold untouched (cmd+tab survives meta).
-const CHORD: ModifierFlags =
-    ModifierFlags(ModifierFlags::CMD.0 | ModifierFlags::CTRL.0 | ModifierFlags::OPT.0);
+const CHORD: ModifierFlags = ModifierFlags(ModifierFlags::CMD.0 | CTRL_OPT.0);
+const CTRL_OPT: ModifierFlags = ModifierFlags(ModifierFlags::CTRL.0 | ModifierFlags::OPT.0);
+
+fn synth(key: PhysicalKey, down: bool, flags: ModifierFlags) -> Action {
+    Action::Synth(SynthKey { key, down, flags })
+}
 
 pub struct Engine {
     phase: Phase,
-    /// Whether F18 is physically down right now, independent of the phase:
+    /// Whether META is physically down right now, independent of the phase:
     /// the overlay survives its release, and commit/cancel land differently
     /// depending on whether meta is still held.
     meta_down: bool,
@@ -132,29 +135,23 @@ pub struct Engine {
 }
 
 impl Engine {
-    /// Build the engine. `config` and `index` are shared lock-free snapshots;
-    /// the engine's output crosses to the UI and main thread only inside the
-    /// returned `Vec<Action>`, which the tap callback routes.
     pub fn new(config: Arc<ArcSwap<Config>>, index: Arc<ArcSwap<crate::bridge::AppIndex>>) -> Self {
-        let config_snapshot = config.load_full();
-        let tables = build_tables(&config_snapshot);
-        let tables_version = config_snapshot.version;
-        let memory = config_snapshot.label_memory.clone();
+        let snapshot = config.load_full();
         Engine {
             phase: Phase::Idle,
             meta_down: false,
+            tables: build_tables(&snapshot),
+            tables_version: snapshot.version,
+            memory: snapshot.label_memory.clone(),
             config,
-            tables,
-            tables_version,
             index,
             route: [Route::Undecided; 256],
             last: None,
-            memory,
         }
     }
 
     /// The single decision point. Invariants:
-    /// - F18 is always swallowed; real caps behavior can never leak (the
+    /// - META is always swallowed; real caps behavior can never leak (the
     ///   hidutil remap guarantees macOS never sees a Caps Lock event).
     /// - Any key event during the hold, including passed modifier chords,
     ///   marks the press used, which kills the Esc-on-release.
@@ -175,7 +172,6 @@ impl Engine {
             && down == ev.down
             && t == ev.t
         {
-            // The other tap already decided this exact event.
             return if passed {
                 vec![Action::Pass]
             } else {
@@ -188,10 +184,9 @@ impl Engine {
         actions
     }
 
-    /// The fresh-event decision: dispatch on F18 and the routable key space.
     fn decide(&mut self, ev: RawKey) -> Vec<Action> {
-        if ev.key == F18 {
-            return self.on_f18(ev);
+        if ev.key == META {
+            return self.on_meta(ev);
         }
         if ev.key == TAB && ev.down && !ev.repeat && self.takes_cmd_tab(ev.flags) {
             return self.on_cmd_tab();
@@ -208,10 +203,8 @@ impl Engine {
                 }
                 _ => self.decide_down(ev, ix),
             }
-        } else if ev.down {
-            self.obey_repeat(ev, ix)
         } else {
-            self.decide_up(ev, ix)
+            self.obey(ev, ix)
         };
         match &mut self.phase {
             Phase::Armed { used, .. }
@@ -259,7 +252,7 @@ impl Engine {
         }
     }
 
-    fn on_f18(&mut self, ev: RawKey) -> Vec<Action> {
+    fn on_meta(&mut self, ev: RawKey) -> Vec<Action> {
         if ev.down {
             match &mut self.phase {
                 // Re-arm on a second down: tolerates duplicate evidence from
@@ -272,8 +265,6 @@ impl Engine {
                 }
                 // A down during an active hold is duplicate evidence only.
                 Phase::Held { .. } => {}
-                // A second meta press over the open overlay arms the
-                // bare-release dismissal.
                 Phase::Overlay { rearm, .. } => {
                     rearm.get_or_insert(false);
                 }
@@ -283,47 +274,33 @@ impl Engine {
         }
         self.meta_down = false;
         let mut actions = vec![Action::Swallow];
-        let mut dismiss = false;
-        match &self.phase {
-            Phase::Idle => {}
-            Phase::Armed { down_at, used } => {
-                let tap_max = self.config.load_full().tap_max_ms as u64;
-                if !*used && ev.t.ms_since(*down_at) <= tap_max {
-                    actions.push(Action::Synth(SynthKey {
-                        key: ESC,
-                        down: true,
-                        flags: ModifierFlags::NONE,
-                    }));
-                    actions.push(Action::Synth(SynthKey {
-                        key: ESC,
-                        down: false,
-                        flags: ModifierFlags::NONE,
-                    }));
-                }
+        let tap_max = u64::from(self.config.load().tap_max_ms);
+        match self.phase {
+            Phase::Armed {
+                down_at,
+                used: false,
+            } if ev.t.ms_since(down_at) <= tap_max => {
+                actions.extend([
+                    synth(ESC, true, ModifierFlags::NONE),
+                    synth(ESC, false, ModifierFlags::NONE),
+                ]);
+                self.phase = Phase::Idle;
             }
-            Phase::Held { .. } => {}
-            // A bare release of the second meta press dismisses the sticky
-            // overlay; a release after using keys keeps it open.
             Phase::Overlay {
-                rearm: Some(used), ..
-            } => dismiss = !*used,
-            Phase::Overlay { rearm: None, .. } => {}
-        }
-        if dismiss {
-            actions.extend(self.cancel_state()); // HideFade; meta is up -> Idle
-        } else if !matches!(self.phase, Phase::Overlay { .. }) {
-            self.phase = Phase::Idle;
+                rearm: Some(false), ..
+            } => actions.extend(self.cancel_state()),
+            Phase::Overlay { .. } => {}
+            _ => self.phase = Phase::Idle,
         }
         actions
     }
 
-    /// Which layer answers key decisions right now.
     fn layer(&self) -> Layer {
         match &self.phase {
             Phase::Armed { .. } | Phase::Held { .. } | Phase::Idle => Layer::Hidden,
             Phase::Overlay { overlay, .. } => match overlay {
                 OverlayPhase::Pinned => Layer::Pinned,
-                OverlayPhase::Live(model) => Layer::Live(model.rows.clone()),
+                OverlayPhase::Live(rows) => Layer::Live(rows.clone()),
             },
         }
     }
@@ -339,7 +316,7 @@ impl Engine {
     /// trigger setting says so; with Ctrl or Opt it stays a system chord.
     fn takes_cmd_tab(&self, flags: ModifierFlags) -> bool {
         flags.intersects(ModifierFlags::CMD)
-            && !flags.intersects(ModifierFlags(ModifierFlags::CTRL.0 | ModifierFlags::OPT.0))
+            && !flags.intersects(CTRL_OPT)
             && self.config.load().switcher_trigger.cmd_tab()
     }
 
@@ -364,18 +341,14 @@ impl Engine {
     /// Cmd stops making chords inside an overlay that Cmd+Tab drives, so
     /// labels and tab work while Cmd is still down.
     fn chord_flags(&self) -> ModifierFlags {
-        if self.via_cmd() {
-            ModifierFlags(ModifierFlags::CTRL.0 | ModifierFlags::OPT.0)
-        } else {
-            CHORD
-        }
+        if self.via_cmd() { CTRL_OPT } else { CHORD }
     }
 
     fn via_cmd(&self) -> bool {
         matches!(self.phase, Phase::Overlay { via_cmd: true, .. })
     }
 
-    /// A committed hold is inert until F18 releases.
+    /// A committed hold is inert until META releases.
     fn committed(&self) -> bool {
         match &self.phase {
             Phase::Held { committed } | Phase::Overlay { committed, .. } => *committed,
@@ -409,14 +382,7 @@ impl Engine {
             (Some(Chord::Synth(key)), _) => {
                 self.route[ix] = Route::Synth(key);
                 self.phase = Phase::Held { committed: false };
-                vec![
-                    Action::Swallow,
-                    Action::Synth(SynthKey {
-                        key,
-                        down: true,
-                        flags: ev.flags.keep_modifiers(),
-                    }),
-                ]
+                vec![Action::Swallow, synth(key, true, ev.flags)]
             }
             (Some(Chord::ToggleInput), _) => {
                 self.phase = Phase::Held { committed: false };
@@ -442,58 +408,28 @@ impl Engine {
         }
     }
 
-    /// An autorepeat follows its down's decision, whatever the phase now is.
-    fn obey_repeat(&mut self, ev: RawKey, ix: usize) -> Vec<Action> {
-        match self.route[ix] {
-            Route::Pass => vec![Action::Pass],
-            Route::Synth(key) if !self.committed() => vec![
-                Action::Swallow,
-                Action::Synth(SynthKey {
-                    key,
-                    down: true,
-                    flags: ev.flags.keep_modifiers(),
-                }),
-            ],
-            Route::Swallow | Route::Synth(_) => vec![Action::Swallow],
-            Route::Undecided => match &self.phase {
-                Phase::Idle => {
-                    self.route[ix] = Route::Pass;
-                    vec![Action::Pass]
-                }
-                _ => {
-                    self.route[ix] = Route::Swallow;
-                    vec![Action::Swallow]
-                }
-            },
-        }
-    }
-
-    /// An up obeys its down's decision: passed keys pass, synthesized keys
-    /// close with a matching up, swallowed keys stay silent.
-    fn decide_up(&mut self, ev: RawKey, ix: usize) -> Vec<Action> {
-        let route = self.route[ix];
-        self.route[ix] = Route::Undecided;
+    /// Autorepeats and ups obey their down's decision, whatever the phase now
+    /// is: passed keys pass, synthesized keys repeat or close with a matching
+    /// up, swallowed keys stay silent. An up ends the route.
+    fn obey(&mut self, ev: RawKey, ix: usize) -> Vec<Action> {
+        let route = match self.route[ix] {
+            Route::Undecided if matches!(self.phase, Phase::Idle) => Route::Pass,
+            Route::Undecided => Route::Swallow,
+            decided => decided,
+        };
+        self.route[ix] = if ev.down { route } else { Route::Undecided };
         match route {
             Route::Pass => vec![Action::Pass],
-            Route::Synth(key) if !self.committed() => vec![
-                Action::Swallow,
-                Action::Synth(SynthKey {
-                    key,
-                    down: false,
-                    flags: ev.flags.keep_modifiers(),
-                }),
-            ],
-            Route::Swallow | Route::Synth(_) => vec![Action::Swallow],
-            Route::Undecided => match &self.phase {
-                Phase::Idle => vec![Action::Pass],
-                _ => vec![Action::Swallow],
-            },
+            Route::Synth(key) if !self.committed() => {
+                vec![Action::Swallow, synth(key, ev.down, ev.flags)]
+            }
+            _ => vec![Action::Swallow],
         }
     }
 
     /// Where commit and cancel land depends on whether meta is still held:
-    /// a held F18 keeps the chord layer alive (inert when committed), a
-    /// released F18 returns the machine to transparent Idle.
+    /// a held META keeps the chord layer alive (inert when committed), a
+    /// released META returns the machine to transparent Idle.
     fn land(&mut self, committed: bool) {
         self.phase = if self.meta_down {
             Phase::Held { committed }
@@ -507,15 +443,12 @@ impl Engine {
         vec![Action::Ui(UiMsg::HideFade)]
     }
 
-    /// Commit = hide instantly, switch on the main thread, and make the rest
-    /// of the hold inert so leftover autorepeats never type into the app we
-    /// just landed on.
     fn commit(&mut self, app: AppRef) -> Vec<Action> {
         self.land(true);
         vec![
             Action::Swallow,
             Action::Ui(UiMsg::Hide),
-            Action::Job(Job::Switch(SwitchRequest { app })),
+            Action::Job(Job::Switch(app)),
         ]
     }
 
@@ -585,7 +518,7 @@ impl Engine {
         }
         let rows: Arc<[LiveRow]> = Arc::from(rows);
         self.phase = Phase::Overlay {
-            overlay: OverlayPhase::Live(Box::new(LiveModel { rows: rows.clone() })),
+            overlay: OverlayPhase::Live(rows.clone()),
             committed: false,
             rearm: None,
             via_cmd: self.via_cmd(),

@@ -9,17 +9,18 @@ mod view;
 
 use std::sync::Arc;
 use std::sync::mpsc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use mojito_core::config::{self, PinnedApp};
 use mojito_core::labels::{LABEL_PRIORITY, RESERVED};
+use mojito_core::lifecycle::{self, Remap};
 use mojito_core::{ConfigStore, PhysicalKey, SwitcherTrigger};
-use mojito_macos::caps::CapsMap;
-use mojito_macos::layout::LayoutInfo;
-use mojito_macos::{layout, permission};
-use rune::{App, AppHandle, Key, KeyEvent, PhysicalInput, RunOptions, TextEdit, Tx, WindowSpec};
+use mojito_macos::keyboard::caps::CapsMap;
+use mojito_macos::keyboard::layout;
+use mojito_macos::keyboard::layout::LayoutInfo;
+use mojito_macos::shell::permission;
+use rune::{App, Key, KeyEvent, PhysicalInput, RunOptions, TextEdit, Tx, WindowSpec};
 
-use crate::app_spec::Detached;
 use crate::catalog::{self, CatalogApp};
 use crate::keysym;
 
@@ -34,7 +35,8 @@ pub const SIZE: (f32, f32) = (980.0, 760.0);
 /// a `hidutil` subprocess.
 const REFRESH_AFTER: Duration = Duration::from_secs(1);
 
-/// A sidebar section.
+const SAVED_STATUS_FOR: Duration = Duration::from_secs(4);
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Pane {
     Apps,
@@ -75,7 +77,6 @@ pub(super) struct PinnedDraft {
     name: String,
     bundle_id: String,
     key: Option<PhysicalKey>,
-    glyph: Option<char>,
 }
 
 pub(super) enum CatalogState {
@@ -87,11 +88,11 @@ pub(super) enum CatalogState {
 struct Status {
     text: String,
     error: bool,
+    expires: Option<Instant>,
 }
 
 pub struct SettingsState {
     store: Arc<ConfigStore>,
-    hub: AppHandle<Detached>,
     pane: Pane,
     rows: Vec<PinnedDraft>,
     capturing: Option<usize>,
@@ -111,78 +112,40 @@ pub struct SettingsState {
     perm_ready: bool,
     remap_active: bool,
     status: Option<Status>,
-    clear_pending: bool,
-    /// The permission tick runs while the window shows.
-    live_refresh: bool,
 }
 
 impl SettingsState {
-    /// Never runs: `App::init` replaces `AppSpec::init`.
-    pub fn placeholder() -> Self {
-        unreachable!("App::init replaces AppSpec::init")
-    }
-
-    pub fn new(store: Arc<ConfigStore>, hub: AppHandle<Detached>) -> Self {
-        let mut s = Self {
-            store,
-            hub,
-            pane: Pane::Apps,
-            rows: Vec::new(),
+    fn new(store: Arc<ConfigStore>) -> Self {
+        let config = store.handle().load_full();
+        let perm_ready = permission::state() == permission::PermissionState::Ready;
+        Self {
+            pane: if perm_ready { Pane::Apps } else { Pane::System },
+            rows: config
+                .pinned
+                .iter()
+                .map(|p| PinnedDraft {
+                    name: p.name.clone(),
+                    bundle_id: p.bundle_id.clone(),
+                    key: Some(p.key),
+                })
+                .collect(),
             capturing: None,
             catalog_open: false,
             catalog: CatalogState::Idle,
             catalog_rx: None,
             query: TextEdit::new(""),
-            tap_max: 250,
-            hint_layout: None,
-            layouts: Vec::new(),
+            tap_max: config.tap_max_ms,
+            hint_layout: config.hint_layout.clone(),
+            layouts: layout::installed(),
             hint_menu_open: false,
-            trigger: SwitcherTrigger::Both,
+            trigger: config.switcher_trigger,
             trigger_menu_open: false,
-            perm_ready: false,
-            remap_active: false,
+            perm_ready,
+            remap_active: CapsMap.is_active(),
             status: None,
-            clear_pending: false,
-            live_refresh: false,
-        };
-        s.reload();
-        // A fresh install lands on the pane that unblocks the engine.
-        if !s.perm_ready {
-            s.pane = Pane::System;
+            store,
         }
-        s
     }
-
-    /// Draft from the live config, plus the live permission, remap, and
-    /// layout state. Called when the window opens (from the menu pump), not
-    /// on every refocus, so in-progress edits survive a click away.
-    fn reload(&mut self) {
-        let config = self.store.handle().load_full();
-        self.rows = config
-            .pinned
-            .iter()
-            .map(|p| PinnedDraft {
-                name: p.name.clone(),
-                bundle_id: p.bundle_id.clone(),
-                key: Some(p.key),
-                glyph: layout::glyph(p.key),
-            })
-            .collect();
-        self.tap_max = config.tap_max_ms;
-        self.hint_layout = config.hint_layout.clone();
-        self.trigger = config.switcher_trigger;
-        self.layouts = layout::installed();
-        self.capturing = None;
-        self.perm_ready = permission::state() == permission::PermissionState::Ready;
-        self.remap_active = CapsMap.is_active();
-    }
-}
-
-/// Runs when the status item opens the window (right after `open`).
-pub fn opened(s: &mut SettingsState, tx: &mut Tx) {
-    s.reload();
-    s.live_refresh = true;
-    tx.wake_after(REFRESH_AFTER);
 }
 
 /// The settings process: one rune loop and one window. Closing it exits the
@@ -201,25 +164,12 @@ pub fn run_child() {
         // The hint picker's saved choice decides which layout spells the
         // badges, exactly as the hub applies it before the first reveal.
         layout::set_display_layout(store.handle().load().hint_layout.clone());
-        // This process's lifetime is the settings window's, so no
-        // keep_running.
-        let hub = App::new(crate::app_spec::detached_spec())
-            .windowless()
-            .handle();
         let app = App::new(crate::app_spec::settings_spec())
             .standard_menus()
-            .on_close(closed)
-            .init({
-                let store = store.clone();
-                move || SettingsState::new(store, hub)
-            });
-        let handle = app.handle();
-        let app = app.on_ready(move |_| {
-            handle.update(opened);
+            .init(move || SettingsState::new(store))
             // A process spawned from another app gets no activation
             // ceremony; take focus once the window exists.
-            mojito_macos::status_item::activate_self();
-        });
+            .on_ready(|_| mojito_macos::shell::status_item::activate_self());
         vec![
             WindowSpec::from_app("settings", app)
                 .configured_options(crate::app_spec::settings_window_options()),
@@ -227,19 +177,10 @@ pub fn run_child() {
     });
 }
 
-/// The window closed: back to accessory, and the periodic reads stop.
-pub fn closed(s: &mut SettingsState, _: &mut Tx) {
-    s.hub.set_dock_icon(false);
-    s.capturing = None;
-    s.hint_menu_open = false;
-    s.trigger_menu_open = false;
-    close_catalog(s);
-    s.live_refresh = false;
-}
-
-/// Settings poll: delivers the catalog scan, clears the save toast, and
-/// re-reads the permission state once a second while the window shows.
+/// Settings poll: delivers the catalog scan, expires the save status, and
+/// re-reads the permission state once a second.
 pub fn poll(s: &mut SettingsState, _: f64, tx: &mut Tx) -> bool {
+    tx.wake_after(REFRESH_AFTER);
     let mut acted = false;
     if let Some(rx) = &s.catalog_rx
         && let Ok(list) = rx.try_recv()
@@ -248,20 +189,28 @@ pub fn poll(s: &mut SettingsState, _: f64, tx: &mut Tx) -> bool {
         s.catalog_rx = None;
         acted = true;
     }
-    if s.clear_pending {
-        s.clear_pending = false;
+    if s.status
+        .as_ref()
+        .and_then(|st| st.expires)
+        .is_some_and(|at| Instant::now() >= at)
+    {
         s.status = None;
         acted = true;
     }
-    if s.live_refresh {
-        tx.wake_after(REFRESH_AFTER);
-        let ready = permission::state() == permission::PermissionState::Ready;
-        if ready != s.perm_ready {
-            s.perm_ready = ready;
-            acted = true;
-        }
+    let ready = permission::state() == permission::PermissionState::Ready;
+    if ready != s.perm_ready {
+        s.perm_ready = ready;
+        acted = true;
     }
     acted
+}
+
+fn set_status(s: &mut SettingsState, text: impl Into<String>, error: bool) {
+    s.status = Some(Status {
+        text: text.into(),
+        error,
+        expires: None,
+    });
 }
 
 fn save(s: &mut SettingsState, tx: &mut Tx) {
@@ -287,9 +236,9 @@ fn save(s: &mut SettingsState, tx: &mut Tx) {
     // roll it back. Saving then posts the reserved reload keycode so the
     // engine applies the new config live.
     let next = s.store.with_disk_labels(next);
-    match s.store.save(next) {
+    let (text, error) = match s.store.save(next) {
         Ok(()) => {
-            mojito_macos::synth::post_raw(mojito_core::CONTROL_RELOAD.0, true);
+            mojito_macos::keyboard::synth::post_reload();
             let mut note = if unkeyed > 0 {
                 format!("Saved · {unkeyed} app(s) still need a trigger key")
             } else {
@@ -300,39 +249,28 @@ fn save(s: &mut SettingsState, tx: &mut Tx) {
                 note.push_str(" · ");
                 note.push_str(&list.join("; "));
             }
-            s.status = Some(Status {
-                text: note,
-                error: !warnings.is_empty() && unkeyed == 0,
-            });
+            (note, !warnings.is_empty() && unkeyed == 0)
         }
-        Err(error) => {
-            s.status = Some(Status {
-                text: format!("Save failed: {error}"),
-                error: true,
-            });
-        }
-    }
-    s.clear_pending = true;
-    tx.wake_after(Duration::from_secs(4));
+        Err(error) => (format!("Save failed: {error}"), true),
+    };
+    s.status = Some(Status {
+        text,
+        error,
+        expires: Some(Instant::now() + SAVED_STATUS_FOR),
+    });
+    tx.wake_after(SAVED_STATUS_FOR);
 }
 
 /// Steal the key from any other row: duplicates never survive a save, so
 /// claiming here is the honest UX.
 fn assign(s: &mut SettingsState, row: usize, key: PhysicalKey) {
-    for (i, r) in s.rows.iter_mut().enumerate() {
-        if i != row && r.key == Some(key) {
+    for r in &mut s.rows {
+        if r.key == Some(key) {
             r.key = None;
-            r.glyph = None;
         }
     }
-    let draft = &mut s.rows[row];
-    draft.key = Some(key);
-    draft.glyph = layout::glyph(key);
+    s.rows[row].key = Some(key);
     s.capturing = None;
-}
-
-fn start_capture(s: &mut SettingsState, row: usize) {
-    s.capturing = Some(row);
 }
 
 fn remove_row(s: &mut SettingsState, row: usize) {
@@ -344,7 +282,6 @@ fn remove_row(s: &mut SettingsState, row: usize) {
     };
 }
 
-/// First free key in reach order, skipping already-pinned keys.
 fn next_free_key(s: &SettingsState) -> Option<PhysicalKey> {
     let used: Vec<PhysicalKey> = s.rows.iter().filter_map(|r| r.key).collect();
     LABEL_PRIORITY.iter().copied().find(|k| !used.contains(k))
@@ -352,10 +289,7 @@ fn next_free_key(s: &SettingsState) -> Option<PhysicalKey> {
 
 fn add_app(s: &mut SettingsState, app: &CatalogApp) {
     if is_pinned(s, &app.bundle_id) {
-        s.status = Some(Status {
-            text: format!("{} is already pinned", app.name),
-            error: false,
-        });
+        set_status(s, format!("{} is already pinned", app.name), false);
         return;
     }
     let key = next_free_key(s);
@@ -363,7 +297,6 @@ fn add_app(s: &mut SettingsState, app: &CatalogApp) {
         name: app.name.clone(),
         bundle_id: app.bundle_id.clone(),
         key,
-        glyph: key.and_then(layout::glyph),
     });
     close_catalog(s);
 }
@@ -438,30 +371,17 @@ fn choose_trigger(s: &mut SettingsState, trigger: SwitcherTrigger, tx: &mut Tx) 
 }
 
 fn toggle_remap(s: &mut SettingsState, install: bool) {
-    let caps = CapsMap;
-    let result = if install {
-        caps.install()
-    } else {
-        caps.uninstall()
-    };
-    match result {
+    match lifecycle::set_capture(&CapsMap, install) {
         Ok(()) => {
-            s.remap_active = caps.is_active();
-            s.status = Some(Status {
-                text: if s.remap_active {
-                    "Remap installed".into()
-                } else {
-                    "Caps Lock restored".into()
-                },
-                error: false,
-            });
+            s.remap_active = CapsMap.is_active();
+            let text = if s.remap_active {
+                "Remap installed"
+            } else {
+                "Caps Lock restored"
+            };
+            set_status(s, text, false);
         }
-        Err(error) => {
-            s.status = Some(Status {
-                text: error,
-                error: true,
-            })
-        }
+        Err(error) => set_status(s, error, true),
     }
 }
 
@@ -479,7 +399,7 @@ fn capture_input(s: &mut SettingsState, row: usize, ev: &PhysicalInput) -> bool 
             if s.capturing != Some(row) {
                 return false;
             }
-            if !mods_are_bare(mods) {
+            if *mods != rune::Mods::default() {
                 return true;
             }
             if *key == rune::PhysicalKeyCode::Escape {
@@ -488,18 +408,10 @@ fn capture_input(s: &mut SettingsState, row: usize, ev: &PhysicalInput) -> bool 
             }
             match keysym::physical(*key) {
                 Some(pk) if RESERVED.contains(&pk) => {
-                    s.status = Some(Status {
-                        text: "That key is reserved (meta, esc, return, e)".to_string(),
-                        error: true,
-                    });
+                    set_status(s, "That key is reserved (meta, esc, return, e)", true);
                 }
                 Some(pk) => assign(s, row, pk),
-                None => {
-                    s.status = Some(Status {
-                        text: "That key can't be a trigger".to_string(),
-                        error: true,
-                    });
-                }
+                None => set_status(s, "That key can't be a trigger", true),
             }
             true
         }
@@ -509,8 +421,4 @@ fn capture_input(s: &mut SettingsState, row: usize, ev: &PhysicalInput) -> bool 
         }
         _ => false,
     }
-}
-
-fn mods_are_bare(mods: &rune::Mods) -> bool {
-    !(mods.shift || mods.cmd || mods.alt || mods.ctrl || mods.logo)
 }

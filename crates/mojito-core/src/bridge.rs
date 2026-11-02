@@ -12,13 +12,6 @@ pub struct PinnedRow {
     pub bundle_id: String,
 }
 
-/// Frozen when Live mode is entered; never mutated during the hold, so
-/// labels cannot reshuffle under the user's fingers.
-#[derive(Debug)]
-pub struct LiveModel {
-    pub rows: Arc<[LiveRow]>,
-}
-
 #[derive(Clone, Debug, PartialEq)]
 pub struct LiveRow {
     pub pid: i32,
@@ -62,17 +55,11 @@ pub enum UiMsg {
 pub enum AppRef {
     Pid(i32),
     Bundle(String),
-    Launch(std::path::PathBuf, String),
-}
-
-#[derive(Debug, PartialEq)]
-pub struct SwitchRequest {
-    pub app: AppRef,
 }
 
 #[derive(Debug, PartialEq)]
 pub enum Job {
-    Switch(SwitchRequest),
+    Switch(AppRef),
     /// Caps-style input-source toggle: return to the two-most-recent source.
     ToggleInputSource,
     RefreshWindowCounts,

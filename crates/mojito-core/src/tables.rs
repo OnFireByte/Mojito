@@ -9,8 +9,6 @@ use crate::key::{
 
 pub const TABLE_SLOTS: usize = 128;
 
-/// What a key does in a phase. Labels live in [`crate::bridge::LiveModel`],
-/// not here; pinned trigger keys land in the pinned table.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Chord {
     /// Arrow/backspace positions; the engine fills `flags` from the
@@ -45,44 +43,26 @@ pub fn build_tables(config: &Config) -> Tables {
             slot[key.0 as usize] = Some(chord);
         }
     };
-    put(
-        &mut tables.hidden,
-        PhysicalKey(0x04),
-        Chord::Synth(ARROW_LEFT),
-    ); // h
-    put(
-        &mut tables.hidden,
-        PhysicalKey(0x26),
-        Chord::Synth(ARROW_DOWN),
-    ); // j
-    put(
-        &mut tables.hidden,
-        PhysicalKey(0x28),
-        Chord::Synth(ARROW_UP),
-    ); // k
-    put(
-        &mut tables.hidden,
-        PhysicalKey(0x25),
-        Chord::Synth(ARROW_RIGHT),
-    ); // l
-    put(
-        &mut tables.hidden,
-        PhysicalKey(0x22),
-        Chord::Synth(BACKSPACE),
-    ); // i
+    let vim = [
+        (PhysicalKey(0x04), ARROW_LEFT),  // h
+        (PhysicalKey(0x26), ARROW_DOWN),  // j
+        (PhysicalKey(0x28), ARROW_UP),    // k
+        (PhysicalKey(0x25), ARROW_RIGHT), // l
+        (PhysicalKey(0x22), BACKSPACE),   // i
+    ];
+    for (key, target) in vim {
+        put(&mut tables.hidden, key, Chord::Synth(target));
+    }
     put(&mut tables.hidden, RETURN, Chord::ToggleInput);
     if config.switcher_trigger.caps_e() {
         put(&mut tables.hidden, SWITCHER, Chord::OpenPinned);
     }
 
     for (i, app) in config.pinned.iter().enumerate() {
-        if crate::labels::RESERVED.contains(&app.key) {
-            continue;
+        let free = matches!(tables.pinned.get(app.key.0 as usize), Some(None));
+        if free && !crate::labels::RESERVED.contains(&app.key) {
+            put(&mut tables.pinned, app.key, Chord::TriggerPin(i as u16));
         }
-        if matches!(tables.pinned.get(app.key.0 as usize), Some(Some(_))) {
-            continue; // first-wins on duplicate trigger keys
-        }
-        put(&mut tables.pinned, app.key, Chord::TriggerPin(i as u16));
     }
     put(&mut tables.pinned, SWITCHER, Chord::ToggleMode);
     put(&mut tables.pinned, TAB, Chord::ToggleMode);
@@ -141,7 +121,7 @@ mod tests {
         assert_eq!(t.pinned[0x01], Some(Chord::TriggerPin(1)));
         assert_eq!(t.pinned[SWITCHER.0 as usize], Some(Chord::ToggleMode));
         assert_eq!(t.pinned[ESC.0 as usize], Some(Chord::Cancel));
-        assert_eq!(t.pinned[0x04], None); // unbound bare key
+        assert_eq!(t.pinned[0x04], None);
     }
 
     #[test]
@@ -152,8 +132,6 @@ mod tests {
         };
         let t = build_tables(&config);
         assert_eq!(t.pinned[0x03], Some(Chord::TriggerPin(0)));
-        // The key never routes to the second pin: one key, one pin.
-        assert_ne!(t.pinned[0x03], Some(Chord::TriggerPin(1)));
     }
 
     #[test]

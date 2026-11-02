@@ -3,23 +3,21 @@
 //! and popovers mount above the page through rune-kit's root.
 
 use rune::{Anim, Cx, El, ScrollSpec, Tx, col, el, icon, row, text};
-use rune_kit::{Button, ButtonVariant, ControlSize};
+use rune_kit::ButtonVariant;
 
-use super::controls::{METRICS, Paint, page};
+use super::controls::{METRICS, Paint, button, page};
 use super::panes;
 use super::{Pane, SettingsState, save, toggle_catalog};
 
-/// How far a scroll body's top and bottom edges fade out.
 const SCROLL_FADE: (f32, f32) = (4.0, 24.0);
 
 pub fn view(s: &SettingsState, cx: &mut Cx<SettingsState>) -> El {
     let p = Paint::new(cx.system_dark(), cx.env().scale);
-    // Menus and popovers mount above the page (rune-kit overlays).
     let mut layer = Vec::new();
     let body = match s.pane {
-        Pane::Apps => panes::apps(s, p, &mut layer),
+        Pane::Apps => panes::apps(s, p),
         Pane::Behavior => panes::behavior(s, p, &mut layer),
-        Pane::System => panes::system(s, p, &mut layer),
+        Pane::System => panes::system(s, p),
     };
     let panel = col()
         .key("panel")
@@ -65,25 +63,17 @@ fn scroll_body(key: &str, content: El) -> El {
         .child(col().key("inset").pt(top).pb(bottom).child(content))
 }
 
-/// The pane title with its one standing action, on the panel.
 fn pane_header(s: &SettingsState, p: Paint) -> El {
-    let action = match s.pane {
-        Pane::Apps => Some(
-            Button::new(if s.catalog_open {
-                "Cancel"
-            } else {
-                "Add app…"
-            })
-            .variant(ButtonVariant::Neutral)
-            .on_press(toggle_catalog)
-            .control_size(ControlSize::Large)
-            .build(p.k)
-            .px(11.0)
-            .radius(p.k.radius.md)
-            .key("add-app"),
-        ),
-        Pane::Behavior | Pane::System => None,
-    };
+    let action = (s.pane == Pane::Apps).then(|| {
+        let label = if s.catalog_open {
+            "Cancel"
+        } else {
+            "Add app…"
+        };
+        button(p, "add-app", label, ButtonVariant::Neutral, |s, _| {
+            toggle_catalog(s)
+        })
+    });
     row()
         .key("pane-header")
         .h(52.0)
@@ -105,15 +95,13 @@ fn pane_header(s: &SettingsState, p: Paint) -> El {
 /// Sidebar rows follow OpenCode Desktop's settings navigation: 28 pt rows
 /// with a 4 pt gap, so each row's highlight stays its own.
 fn sidebar(s: &SettingsState, p: Paint) -> El {
-    let mut nav = col()
+    let nav = col()
         .key("nav")
         .role("list")
         .focus_group()
         .focus_follows()
-        .gap(4.0);
-    for pane in Pane::ALL {
-        nav = nav.child(nav_item(s, p, pane));
-    }
+        .gap(4.0)
+        .children(Pane::ALL.map(|pane| nav_item(s, p, pane)));
     col()
         .key("sidebar")
         .role("navigation")
@@ -178,8 +166,6 @@ fn select_pane(s: &mut SettingsState, tx: &mut Tx, pane: Pane) {
     }
 }
 
-/// The save footer: the status line from the last save, and the window's one
-/// accent button.
 fn footer(s: &SettingsState, p: Paint) -> El {
     let status = s.status.as_ref().map(|st| {
         text(st.text.clone())
@@ -207,15 +193,6 @@ fn footer(s: &SettingsState, p: Paint) -> El {
                 .center_y()
                 .children(status)
                 .child(el().key("footer-spacer").grow(1.0))
-                .child(
-                    Button::new("Save")
-                        .variant(ButtonVariant::Submit)
-                        .on_press_tx(save)
-                        .control_size(ControlSize::Large)
-                        .build(p.k)
-                        .px(11.0)
-                        .radius(p.k.radius.md)
-                        .key("save"),
-                ),
+                .child(button(p, "save", "Save", ButtonVariant::Submit, save)),
         )
 }

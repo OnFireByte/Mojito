@@ -1,7 +1,7 @@
 //! Label assignment: deterministic, injective, Colemak-DH reach order.
 
 use crate::bridge::AppSlot;
-use crate::key::{ESC, F18, PhysicalKey, RETURN, SWITCHER, TAB};
+use crate::key::{ESC, META, PhysicalKey, RETURN, SWITCHER, TAB};
 use std::collections::HashSet;
 
 /// QWERTY-position virtual keycodes, best reach first. The first ten are the
@@ -41,11 +41,11 @@ pub const LABEL_PRIORITY: [PhysicalKey; 26] = [
 
 /// Keys no label or pin may ever take. Enforced in config validation and in
 /// label assignment; single source of truth.
-pub const RESERVED: [PhysicalKey; 5] = [F18, ESC, RETURN, SWITCHER, TAB];
+pub const RESERVED: [PhysicalKey; 5] = [META, ESC, RETURN, SWITCHER, TAB];
 
 /// Sticky label memory: an app keeps its last label when that key is free
 /// this activation, so labels stay consistent across activations.
-#[derive(Default, Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[derive(Default, Debug, Clone, PartialEq, serde::Serialize)]
 pub struct LabelMemory(pub std::collections::BTreeMap<String, PhysicalKey>);
 
 /// Assign labels to rows in the given (recency) order. Walk LABEL_PRIORITY
@@ -57,34 +57,19 @@ pub fn assign_labels(
     memory: &LabelMemory,
     pinned: &[PhysicalKey],
 ) -> Vec<Option<PhysicalKey>> {
-    let mut used: HashSet<PhysicalKey> = HashSet::new();
-    let mut cursor = 0usize;
-    let mut result = Vec::with_capacity(rows.len());
-    for row in rows {
-        let mut granted = None;
-        if let Some(bundle) = &row.bundle_id
-            && let Some(&key) = memory.0.get(bundle)
-            && !RESERVED.contains(&key)
-            && !pinned.contains(&key)
-            && used.insert(key)
-        {
-            granted = Some(key);
-        }
-        if granted.is_none() {
-            while cursor < LABEL_PRIORITY.len() {
-                let key = LABEL_PRIORITY[cursor];
-                cursor += 1;
-                if pinned.contains(&key) || used.contains(&key) {
-                    continue;
-                }
-                used.insert(key);
-                granted = Some(key);
-                break;
-            }
-        }
-        result.push(granted);
-    }
-    result
+    let mut used = HashSet::new();
+    let mut pool = LABEL_PRIORITY
+        .into_iter()
+        .filter(|key| !pinned.contains(key));
+    rows.iter()
+        .map(|row| {
+            row.bundle_id
+                .as_ref()
+                .and_then(|bundle| memory.0.get(bundle).copied())
+                .filter(|key| !RESERVED.contains(key) && !pinned.contains(key) && used.insert(*key))
+                .or_else(|| pool.find(|key| used.insert(*key)))
+        })
+        .collect()
 }
 
 #[cfg(test)]
@@ -124,7 +109,7 @@ mod tests {
         let got: Vec<PhysicalKey> = labels.iter().copied().flatten().collect();
         assert_eq!(got, LABEL_PRIORITY);
         // The reserved keys never appear even with demand for every key.
-        for reserved in [F18, ESC, RETURN, SWITCHER] {
+        for reserved in [META, ESC, RETURN, SWITCHER] {
             assert!(!got.contains(&reserved));
         }
     }

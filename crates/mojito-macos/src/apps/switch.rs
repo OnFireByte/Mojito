@@ -2,7 +2,7 @@
 //! timeouts. Ladder: focused window -> main window -> first window -> none.
 //! No kCGWindowName reads anywhere (that needs Screen Recording permission).
 
-use mojito_core::{AppRef, SwitchRequest};
+use mojito_core::AppRef;
 use objc2::rc::Retained;
 use objc2_app_kit::{
     NSApplicationActivationOptions, NSApplicationActivationPolicy, NSRunningApplication,
@@ -10,10 +10,13 @@ use objc2_app_kit::{
 };
 use objc2_foundation::{NSDictionary, NSString, NSURL};
 
-use crate::ax::AxElement;
-use crate::permission::{self, PermissionState};
+use super::ax::AxElement;
+use crate::shell::permission::{self, PermissionState};
 
-pub struct SwitchError(pub String);
+pub enum SwitchNote {
+    Step(String),
+    Problem(String),
+}
 
 const KAX_FOCUSED_WINDOW: &str = "AXFocusedWindow";
 const KAX_MAIN_WINDOW: &str = "AXMainWindow";
@@ -25,36 +28,46 @@ const KAX_RAISE_ACTION: &str = "AXRaise";
 /// Degradation: Accessibility denied or no raisable window yields
 /// activation-only (still a correct app-level switch). Runs on the main
 /// thread as `Job::Switch`.
-pub fn switch_to(req: &SwitchRequest, on_error: &mut dyn FnMut(&SwitchError)) {
-    let Some(pid) = resolve(&req.app) else {
-        on_error(&SwitchError("could not find or launch that app".into()));
+pub fn switch_to(app: &AppRef, note: &mut dyn FnMut(SwitchNote)) {
+    let Some(pid) = resolve(app) else {
+        note(SwitchNote::Problem(
+            "could not find or launch that app".into(),
+        ));
         return;
     };
+    note(SwitchNote::Step(format!("resolve: pid {pid}")));
     let Some(app) = NSRunningApplication::runningApplicationWithProcessIdentifier(pid) else {
-        on_error(&SwitchError(
+        note(SwitchNote::Problem(
             "the app quit between resolve and activate".into(),
         ));
         return;
     };
     if app.isHidden() {
         app.unhide();
+        note(SwitchNote::Step("unhide".into()));
     }
     unminimize(pid);
     // Activation is best-effort: AXRaise runs even when it is refused.
-    let _ = app.activateWithOptions(NSApplicationActivationOptions::empty());
+    let activated = app.activateWithOptions(NSApplicationActivationOptions::empty());
+    note(SwitchNote::Step(format!("activate: {activated}")));
 
     if permission::state() == PermissionState::NeedsGrant {
-        on_error(&SwitchError(
+        note(SwitchNote::Problem(
             "switched app only: grant Accessibility to raise its window".into(),
         ));
         return;
     }
     // A windowless app (Finder preferences, background tools) is a normal
     // activation-only switch, not an error.
-    if let Ok((_, window)) = pick_window(pid)
-        && let Err(message) = window.perform(KAX_RAISE_ACTION)
-    {
-        on_error(&SwitchError(message));
+    match pick_window(pid) {
+        Ok((via, window)) => {
+            note(SwitchNote::Step(format!("pick_window: via {via}")));
+            match window.perform(KAX_RAISE_ACTION) {
+                Ok(()) => note(SwitchNote::Step("raise: ok".into())),
+                Err(message) => note(SwitchNote::Problem(message)),
+            }
+        }
+        Err(message) => note(SwitchNote::Step(format!("pick_window: {message}"))),
     }
 }
 
@@ -78,29 +91,10 @@ fn pick_window(pid: i32) -> Result<(&'static str, AxElement), String> {
 /// a failing ladder names the failing step. Runs without the GUI.
 pub fn debug_switch(bundle: &str) {
     let app = AppRef::Bundle(bundle.to_string());
-    let Some(pid) = resolve(&app) else {
-        println!("resolve: FAILED for {bundle}");
-        return;
-    };
-    println!("resolve: pid {pid}");
-    let Some(running) = NSRunningApplication::runningApplicationWithProcessIdentifier(pid) else {
-        println!("running app: not found");
-        return;
-    };
-    println!("hidden: {}", running.isHidden());
-    unminimize(pid);
-    let activated = running.activateWithOptions(NSApplicationActivationOptions::empty());
-    println!("activate: {activated}");
-    match pick_window(pid) {
-        Ok((via, window)) => {
-            println!("pick_window: via {via}");
-            match window.perform(KAX_RAISE_ACTION) {
-                Ok(()) => println!("raise: ok"),
-                Err(message) => println!("raise: {message}"),
-            }
-        }
-        Err(message) => println!("pick_window: {message}"),
-    }
+    switch_to(&app, &mut |note| match note {
+        SwitchNote::Step(step) => println!("{step}"),
+        SwitchNote::Problem(problem) => println!("FAILED: {problem}"),
+    });
 }
 
 /// Clear kAXMinimized before raising a minimized target. Best-effort.
@@ -127,11 +121,6 @@ fn resolve(app: &AppRef) -> Option<i32> {
                 NSWorkspace::sharedWorkspace()
                     .URLForApplicationWithBundleIdentifier(&NSString::from_str(bundle))?,
             )
-        }),
-        AppRef::Launch(path, bundle) => running_with_bundle(bundle).or_else(|| {
-            launch(NSURL::fileURLWithPath(&NSString::from_str(
-                &path.to_string_lossy(),
-            )))
         }),
     };
     running.map(|app| app.processIdentifier())

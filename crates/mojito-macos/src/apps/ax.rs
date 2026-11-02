@@ -3,6 +3,8 @@ use std::ptr::{self, NonNull};
 use objc2_application_services::{AXError, AXUIElement};
 use objc2_core_foundation::{CFArray, CFBoolean, CFRetained, CFString, CFType, ConcreteType};
 
+use crate::cf::cf_items;
+
 const MESSAGING_TIMEOUT_SECS: f32 = 0.25;
 
 pub(crate) struct AxElement(CFRetained<AXUIElement>);
@@ -22,12 +24,8 @@ impl AxElement {
         let Some(array) = self.copy::<CFArray>(attribute) else {
             return Vec::new();
         };
-        // SAFETY: every element of a CFArray is a CFType; each one is
-        // type-checked with `downcast` before use.
-        let array = unsafe { CFRetained::cast_unchecked::<CFArray<CFType>>(array) };
-        array
-            .iter()
-            .filter_map(|item| item.downcast::<AXUIElement>().ok())
+        cf_items::<AXUIElement>(array)
+            .into_iter()
             .filter_map(Self::bounded)
             .collect()
     }

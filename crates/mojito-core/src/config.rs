@@ -2,7 +2,10 @@
 //! this is the only place config errors exist.
 
 use crate::key::PhysicalKey;
-use serde::Serialize;
+use serde::de::DeserializeOwned;
+use serde::{Deserialize, Serialize};
+use serde_json::{Map, Value};
+use std::collections::HashSet;
 
 #[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct Config {
@@ -34,7 +37,7 @@ impl Default for Config {
 
 /// Which gesture opens the switcher: Caps+E, Cmd+Tab (taking it over from
 /// macOS), or either.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SwitcherTrigger {
     CapsE,
@@ -52,15 +55,6 @@ impl SwitcherTrigger {
     pub fn cmd_tab(self) -> bool {
         matches!(self, Self::CmdTab | Self::Both)
     }
-
-    fn parse(name: &str) -> Option<Self> {
-        match name {
-            "caps_e" => Some(Self::CapsE),
-            "cmd_tab" => Some(Self::CmdTab),
-            "both" => Some(Self::Both),
-            _ => None,
-        }
-    }
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize)]
@@ -73,10 +67,8 @@ pub struct PinnedApp {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Warning(pub String);
 
-/// Parse settings JSON with hex's recovery rules: unknown keys ignored; an
-/// invalid field defaults in memory with a warning; duplicate trigger keys
-/// resolve first-wins with a warning; reserved and out-of-range keys rejected
-/// with a warning.
+/// Parse settings JSON with hex's recovery rules: unknown keys ignored, an
+/// invalid field keeps its default with a warning, pins go through `admit`.
 /// Never fails hard: a corrupt file yields defaults and warnings. Empty input
 /// is a fresh install, not corruption.
 pub fn parse(bytes: &[u8]) -> (Config, Vec<Warning>) {
@@ -84,7 +76,7 @@ pub fn parse(bytes: &[u8]) -> (Config, Vec<Warning>) {
     if bytes.is_empty() {
         return (Config::default(), warnings);
     }
-    let value: serde_json::Value = match serde_json::from_slice(bytes) {
+    let value: Value = match serde_json::from_slice(bytes) {
         Ok(v) => v,
         Err(e) => {
             warnings.push(Warning(format!(
@@ -101,78 +93,22 @@ pub fn parse(bytes: &[u8]) -> (Config, Vec<Warning>) {
     };
 
     let mut config = Config::default();
-    if let Some(v) = obj.get("tap_max_ms") {
-        match v.as_u64() {
-            Some(n) if n <= u16::MAX as u64 => config.tap_max_ms = n as u16,
-            _ => warnings.push(Warning("tap_max_ms: invalid value; using 250".into())),
-        }
-    }
-    if let Some(v) = obj.get("capture_enabled") {
-        match v.as_bool() {
-            Some(b) => config.capture_enabled = b,
-            None => warnings.push(Warning("capture_enabled: invalid value; using true".into())),
-        }
-    }
-    if let Some(v) = obj.get("hint_layout") {
-        match v {
-            serde_json::Value::Null => {}
-            serde_json::Value::String(id) => config.hint_layout = Some(id.clone()),
-            _ => warnings.push(Warning(
-                "hint_layout: invalid value; following the current layout".into(),
-            )),
-        }
-    }
-    if let Some(v) = obj.get("switcher_trigger") {
-        match v.as_str().and_then(SwitcherTrigger::parse) {
-            Some(trigger) => config.switcher_trigger = trigger,
-            None => warnings.push(Warning(
-                "switcher_trigger: invalid value; using both".into(),
-            )),
-        }
-    }
-    if let Some(v) = obj.get("version") {
-        match v.as_u64() {
-            Some(n) => config.version = n,
-            None => warnings.push(Warning("version: invalid value; ignored".into())),
-        }
-    }
+    warnings.extend(
+        [
+            read_field(obj, "tap_max_ms", &mut config.tap_max_ms),
+            read_field(obj, "capture_enabled", &mut config.capture_enabled),
+            read_field(obj, "hint_layout", &mut config.hint_layout),
+            read_field(obj, "switcher_trigger", &mut config.switcher_trigger),
+            read_field(obj, "version", &mut config.version),
+        ]
+        .into_iter()
+        .flatten(),
+    );
     if let Some(v) = obj.get("pinned") {
         match v.as_array() {
             None => warnings.push(Warning("pinned: not a list; ignored".into())),
             Some(entries) => {
-                let mut seen = std::collections::HashSet::new();
-                for (i, entry) in entries.iter().enumerate() {
-                    let Some(entry) = entry.as_object() else {
-                        warnings.push(Warning(format!("pinned[{i}]: not an object; skipped")));
-                        continue;
-                    };
-                    let name = entry.get("name").and_then(|v| v.as_str());
-                    let bundle = entry.get("bundle_id").and_then(|v| v.as_str());
-                    let key = entry.get("key").and_then(key_from_json);
-                    let (Some(name), Some(bundle), Some(key)) = (name, bundle, key) else {
-                        warnings.push(Warning(format!(
-                            "pinned[{i}]: missing or invalid field; skipped"
-                        )));
-                        continue;
-                    };
-                    if let Some(reason) = unbindable(key) {
-                        warnings.push(Warning(format!(
-                            "pinned[{i}]: key {key:?} {reason}; skipped"
-                        )));
-                        continue;
-                    }
-                    if !seen.insert(key) {
-                        warnings.push(Warning(format!(
-                            "pinned[{i}]: duplicate trigger key {key:?}; first wins"
-                        )));
-                        continue;
-                    }
-                    config.pinned.push(PinnedApp {
-                        name: name.into(),
-                        bundle_id: bundle.into(),
-                        key,
-                    });
-                }
+                config.pinned = admit(entries.iter().map(pinned_from_json), &mut warnings)
             }
         }
     }
@@ -199,9 +135,37 @@ pub fn parse(bytes: &[u8]) -> (Config, Vec<Warning>) {
     (config, warnings)
 }
 
+fn read_field<T: DeserializeOwned>(
+    obj: &Map<String, Value>,
+    key: &str,
+    slot: &mut T,
+) -> Option<Warning> {
+    match T::deserialize(obj.get(key)?) {
+        Ok(parsed) => {
+            *slot = parsed;
+            None
+        }
+        Err(_) => Some(Warning(format!("{key}: invalid value; using the default"))),
+    }
+}
+
+fn pinned_from_json(entry: &Value) -> Result<PinnedApp, String> {
+    let entry = entry.as_object().ok_or("not an object; skipped")?;
+    let text = |field| entry.get(field).and_then(Value::as_str);
+    let key = entry.get("key").and_then(key_from_json);
+    match (text("name"), text("bundle_id"), key) {
+        (Some(name), Some(bundle), Some(key)) => Ok(PinnedApp {
+            name: name.into(),
+            bundle_id: bundle.into(),
+            key,
+        }),
+        _ => Err("missing or invalid field; skipped".into()),
+    }
+}
+
 /// Keys arrive as virtual keycodes: a JSON number, or a hex string
 /// ("0x2E" or "2E") from hand-edited files. Anything else is invalid.
-fn key_from_json(value: &serde_json::Value) -> Option<PhysicalKey> {
+fn key_from_json(value: &Value) -> Option<PhysicalKey> {
     if let Some(n) = value.as_u64() {
         return u16::try_from(n).ok().map(PhysicalKey);
     }
@@ -211,6 +175,33 @@ fn key_from_json(value: &serde_json::Value) -> Option<PhysicalKey> {
         .or_else(|| s.strip_prefix("0X"))
         .unwrap_or(s);
     u16::from_str_radix(digits, 16).ok().map(PhysicalKey)
+}
+
+/// The pinned-app rules shared by file parsing and settings validation:
+/// reserved and out-of-range keys rejected, duplicate keys first-wins.
+/// Every drop leaves a warning.
+fn admit(
+    candidates: impl Iterator<Item = Result<PinnedApp, String>>,
+    warnings: &mut Vec<Warning>,
+) -> Vec<PinnedApp> {
+    let mut seen = HashSet::new();
+    let mut admitted = Vec::new();
+    for (i, candidate) in candidates.enumerate() {
+        let verdict = candidate.and_then(|app| {
+            if let Some(reason) = unbindable(app.key) {
+                Err(format!("key {:?} {reason}; skipped", app.key))
+            } else if !seen.insert(app.key) {
+                Err(format!("duplicate trigger key {:?}; first wins", app.key))
+            } else {
+                Ok(app)
+            }
+        });
+        match verdict {
+            Ok(app) => admitted.push(app),
+            Err(reason) => warnings.push(Warning(format!("pinned[{i}]: {reason}"))),
+        }
+    }
+    admitted
 }
 
 fn unbindable(key: PhysicalKey) -> Option<&'static str> {
@@ -223,44 +214,25 @@ fn unbindable(key: PhysicalKey) -> Option<&'static str> {
     }
 }
 
-/// Boundary validation for a draft from the settings UI: duplicate keys
-/// first-wins, reserved and out-of-range keys rejected, name and bundle required. The returned
-/// config is the validated draft (dropped entries removed), warnings explain
-/// every drop.
+/// Boundary validation for a draft from the settings UI: `admit`'s rules,
+/// plus a name and bundle id on every pin.
 pub fn validate(draft: Config) -> (Config, Vec<Warning>) {
     let mut warnings = Vec::new();
-    let mut seen = std::collections::HashSet::new();
-    let mut pinned = Vec::with_capacity(draft.pinned.len());
-    for (i, app) in draft.pinned.into_iter().enumerate() {
+    let named = draft.pinned.into_iter().map(|app| {
         if app.name.trim().is_empty() || app.bundle_id.trim().is_empty() {
-            warnings.push(Warning(format!(
-                "pinned[{i}]: name and bundle_id are required; skipped"
-            )));
-            continue;
+            Err("name and bundle_id are required; skipped".to_string())
+        } else {
+            Ok(app)
         }
-        if let Some(reason) = unbindable(app.key) {
-            warnings.push(Warning(format!(
-                "pinned[{i}]: key {:?} {reason}; skipped",
-                app.key
-            )));
-            continue;
-        }
-        if !seen.insert(app.key) {
-            warnings.push(Warning(format!(
-                "pinned[{i}]: duplicate trigger key {:?}; first wins",
-                app.key
-            )));
-            continue;
-        }
-        pinned.push(app);
-    }
+    });
+    let pinned = admit(named, &mut warnings);
     (Config { pinned, ..draft }, warnings)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::key::{ESC, F18, RETURN, SWITCHER};
+    use crate::key::{ESC, META, RETURN, SWITCHER};
     use crate::labels::LabelMemory;
 
     fn parse_str(json: &str) -> (Config, Vec<Warning>) {
@@ -444,7 +416,7 @@ mod tests {
 
     #[test]
     fn validate_rejects_every_reserved_key() {
-        for key in [F18, ESC, RETURN, SWITCHER] {
+        for key in [META, ESC, RETURN, SWITCHER] {
             let draft = Config {
                 pinned: vec![PinnedApp {
                     name: "x".into(),

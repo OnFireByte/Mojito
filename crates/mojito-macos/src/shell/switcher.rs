@@ -66,7 +66,8 @@ pub struct Switcher {
 }
 
 impl Switcher {
-    pub fn new(mtm: MainThreadMarker) -> Self {
+    pub fn create() -> Self {
+        let mtm = MainThreadMarker::new().expect("the switcher lives on the main thread");
         let frame = NSRect::new(NSPoint::ZERO, NSSize::new(CARD_W, card_height(0)));
         let panel = NSPanel::initWithContentRect_styleMask_backing_defer(
             NSPanel::alloc(mtm),
@@ -157,7 +158,7 @@ impl Switcher {
         if self.monitor.is_some() {
             return;
         }
-        let handler = RcBlock::new(|_: NonNull<NSEvent>| crate::synth::post_control());
+        let handler = RcBlock::new(|_: NonNull<NSEvent>| crate::keyboard::synth::post_control());
         self.monitor = NSEvent::addGlobalMonitorForEventsMatchingMask_handler(
             NSEventMask::LeftMouseDown | NSEventMask::RightMouseDown | NSEventMask::OtherMouseDown,
             &handler,
@@ -203,25 +204,25 @@ fn placement(size: (f64, f64), mtm: MainThreadMarker) -> NSRect {
             }
         })
         .collect();
-    let rect = if screens.is_empty() {
-        Rect {
-            x: 0.0,
-            y: 0.0,
-            w: size.0,
-            h: size.1,
-        }
-    } else {
-        let mouse = NSEvent::mouseLocation();
-        let at = geom::display_containing((mouse.x, mouse.y), &screens);
-        geom::centered_rect(size, screens[at])
-    };
+    if screens.is_empty() {
+        return NSRect::new(NSPoint::ZERO, NSSize::new(size.0, size.1));
+    }
+    let mouse = NSEvent::mouseLocation();
+    let at = geom::display_containing((mouse.x, mouse.y), &screens);
+    let rect = geom::centered_rect(size, screens[at]);
     NSRect::new(NSPoint::new(rect.x, rect.y), NSSize::new(rect.w, rect.h))
 }
 
 fn card(mode: Mode, rows: &[Row], height: f64, mtm: MainThreadMarker) -> Retained<NSView> {
     let bounds = NSRect::new(NSPoint::ZERO, NSSize::new(CARD_W, height));
     let content = NSView::initWithFrame(NSView::alloc(mtm), bounds);
-    let painter = Painter::new(&content, height, mtm);
+    let style = Style::new();
+    let painter = Painter {
+        view: &content,
+        height,
+        style: &style,
+        mtm,
+    };
     painter.header(mode);
     for (index, row) in rows.iter().take(MAX_ROWS).enumerate() {
         painter.row(index, row);
@@ -262,8 +263,7 @@ fn glass(bounds: NSRect, content: &NSView, mtm: MainThreadMarker) -> Retained<NS
     Retained::into_super(view)
 }
 
-#[derive(Clone)]
-struct Palette {
+struct Style {
     text: Retained<NSColor>,
     secondary: Retained<NSColor>,
     accent: Retained<NSColor>,
@@ -271,9 +271,13 @@ struct Palette {
     monogram: CFRetained<CGColor>,
     hairline: CFRetained<CGColor>,
     hover: CFRetained<CGColor>,
+    body: Retained<NSFont>,
+    section: Retained<NSFont>,
+    mono: Retained<NSFont>,
+    initial: Retained<NSFont>,
 }
 
-impl Palette {
+impl Style {
     fn new() -> Self {
         let secondary = NSColor::secondaryLabelColor();
         let accent = NSColor::colorWithSRGBRed_green_blue_alpha(
@@ -293,6 +297,10 @@ impl Palette {
                 .into(),
             secondary,
             accent,
+            body: NSFont::systemFontOfSize_weight(14.0, REGULAR),
+            section: NSFont::systemFontOfSize_weight(12.0, SEMIBOLD),
+            mono: NSFont::monospacedSystemFontOfSize_weight(11.0, SEMIBOLD),
+            initial: NSFont::systemFontOfSize_weight(13.0, SEMIBOLD),
         }
     }
 }
@@ -300,38 +308,19 @@ impl Palette {
 struct Painter<'a> {
     view: &'a NSView,
     height: f64,
-    palette: Palette,
-    body: Retained<NSFont>,
-    section: Retained<NSFont>,
-    mono: Retained<NSFont>,
-    initial: Retained<NSFont>,
+    style: &'a Style,
     mtm: MainThreadMarker,
 }
 
 impl<'a> Painter<'a> {
-    fn new(view: &'a NSView, height: f64, mtm: MainThreadMarker) -> Self {
-        Self {
-            view,
-            height,
-            palette: Palette::new(),
-            body: NSFont::systemFontOfSize_weight(14.0, REGULAR),
-            section: NSFont::systemFontOfSize_weight(12.0, SEMIBOLD),
-            mono: NSFont::monospacedSystemFontOfSize_weight(11.0, SEMIBOLD),
-            initial: NSFont::systemFontOfSize_weight(13.0, SEMIBOLD),
-            mtm,
-        }
-    }
-
-    fn within<'b>(&self, view: &'b NSView, height: f64) -> Painter<'b> {
+    fn within<'b>(&self, view: &'b NSView, height: f64) -> Painter<'b>
+    where
+        'a: 'b,
+    {
         Painter {
             view,
             height,
-            palette: self.palette.clone(),
-            body: self.body.clone(),
-            section: self.section.clone(),
-            mono: self.mono.clone(),
-            initial: self.initial.clone(),
-            mtm: self.mtm,
+            ..*self
         }
     }
 
@@ -341,9 +330,9 @@ impl<'a> Painter<'a> {
             Mode::Live => "Open apps",
         };
         let width = CARD_W - 2.0 * (PAD + 4.0);
-        self.label(title, &self.section, &self.palette.secondary)
+        self.label(title, &self.style.section, &self.style.secondary)
             .place(self, PAD + 4.0, PAD, width, HEADER_H);
-        let esc = self.label("esc", &self.mono, &self.palette.secondary);
+        let esc = self.label("esc", &self.style.mono, &self.style.secondary);
         let (text_w, text_h) = esc.size();
         let (chip_w, chip_h) = (text_w + 10.0, text_h + 2.0);
         let chip_x = CARD_W - PAD - 4.0 - chip_w;
@@ -352,7 +341,7 @@ impl<'a> Painter<'a> {
             self.frame(chip_x, chip_top, chip_w, chip_h),
             5.0,
             None,
-            Some(&self.palette.hairline),
+            Some(&self.style.hairline),
         );
         esc.centered().place(self, chip_x, chip_top, chip_w, chip_h);
     }
@@ -362,7 +351,7 @@ impl<'a> Painter<'a> {
         let band = RowView::new(
             self.frame(PAD, row_top(index), width, ROW_H),
             row.key,
-            self.palette.hover.clone(),
+            self.style.hover.clone(),
             self.mtm,
         );
         self.view.addSubview(&band);
@@ -370,52 +359,59 @@ impl<'a> Painter<'a> {
     }
 
     fn row_content(&self, row: &Row, width: f64) {
-        let top = 0.0;
         let left = ROW_INSET;
         let right = width - ROW_INSET;
-        let tile_top = top + (ROW_H - ICON) / 2.0;
+        let tile_top = (ROW_H - ICON) / 2.0;
 
-        self.tile(
-            self.frame(left, tile_top, ICON, ICON),
-            6.0,
-            Some(&self.palette.track),
-            None,
-        );
         let badge = row
             .badge
             .map_or_else(|| "·".to_string(), |c| c.to_uppercase().collect());
-        self.label(&badge, &self.mono, &self.palette.accent)
-            .centered()
-            .place(self, left, tile_top, ICON, ICON);
+        let style = self.style;
+        self.glyph_tile(&badge, &style.mono, left, tile_top, 6.0, &style.track);
 
         let icon_x = left + ICON + ROW_INSET;
         match &row.icon {
             Some(icon) => self.icon(icon, icon_x, tile_top),
-            None => self.monogram(&row.name, icon_x, tile_top),
+            None => {
+                let initial = row
+                    .name
+                    .chars()
+                    .next()
+                    .map_or('?', |c| c.to_uppercase().next().unwrap_or(c));
+                let text = initial.to_string();
+                self.glyph_tile(
+                    &text,
+                    &style.initial,
+                    icon_x,
+                    tile_top,
+                    7.0,
+                    &style.monogram,
+                );
+            }
         }
 
         let name_x = icon_x + ICON + ROW_INSET;
         let mut name_right = right;
         if let Some(count) = row.windows.filter(|n| *n > 1) {
-            let chip = self.label(&format!("×{count}"), &self.mono, &self.palette.secondary);
+            let chip = self.label(&format!("×{count}"), &style.mono, &style.secondary);
             let (text_w, text_h) = chip.size();
             let (chip_w, chip_h) = (text_w + 12.0, text_h + 2.0);
             let chip_x = right - chip_w;
-            let chip_top = top + (ROW_H - chip_h) / 2.0;
+            let chip_top = (ROW_H - chip_h) / 2.0;
             self.tile(
                 self.frame(chip_x, chip_top, chip_w, chip_h),
                 chip_h / 2.0,
-                Some(&self.palette.track),
+                Some(&style.track),
                 None,
             );
             chip.centered()
                 .place(self, chip_x, chip_top, chip_w, chip_h);
             name_right = chip_x - ROW_INSET;
         }
-        self.label(&row.name, &self.body, &self.palette.text).place(
+        self.label(&row.name, &style.body, &style.text).place(
             self,
             name_x,
-            top,
+            0.0,
             name_right - name_x,
             ROW_H,
         );
@@ -423,13 +419,14 @@ impl<'a> Painter<'a> {
 
     fn note(&self, index: usize, text: &str) {
         let left = PAD + ROW_INSET;
-        self.label(text, &self.body, &self.palette.secondary).place(
-            self,
-            left,
-            row_top(index),
-            CARD_W - PAD - ROW_INSET - left,
-            ROW_H,
-        );
+        self.label(text, &self.style.body, &self.style.secondary)
+            .place(
+                self,
+                left,
+                row_top(index),
+                CARD_W - PAD - ROW_INSET - left,
+                ROW_H,
+            );
     }
 
     fn icon(&self, icon: &CGImage, x: f64, top: f64) {
@@ -442,18 +439,9 @@ impl<'a> Painter<'a> {
         self.view.addSubview(&view);
     }
 
-    fn monogram(&self, name: &str, x: f64, top: f64) {
-        self.tile(
-            self.frame(x, top, ICON, ICON),
-            7.0,
-            Some(&self.palette.monogram),
-            None,
-        );
-        let initial = name
-            .chars()
-            .next()
-            .map_or('?', |c| c.to_uppercase().next().unwrap_or(c));
-        self.label(&initial.to_string(), &self.initial, &self.palette.accent)
+    fn glyph_tile(&self, text: &str, font: &NSFont, x: f64, top: f64, radius: f64, fill: &CGColor) {
+        self.tile(self.frame(x, top, ICON, ICON), radius, Some(fill), None);
+        self.label(text, font, &self.style.accent)
             .centered()
             .place(self, x, top, ICON, ICON);
     }
@@ -555,8 +543,8 @@ define_class!(
             if let Some(key) = self.ivars().key
                 && NSPointInRect(point, self.bounds())
             {
-                crate::synth::post_raw(key.0, true);
-                crate::synth::post_raw(key.0, false);
+                crate::keyboard::synth::post_raw(key.0, true);
+                crate::keyboard::synth::post_raw(key.0, false);
             }
         }
     }

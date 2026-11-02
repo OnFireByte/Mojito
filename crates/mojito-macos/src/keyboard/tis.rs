@@ -7,31 +7,16 @@
 use std::sync::Mutex;
 
 use objc2::MainThreadMarker;
-use objc2_core_foundation::{
-    CFArray, CFDictionary, CFPreferencesCopyAppValue, CFRetained, CFString, CFType,
-};
+use objc2_core_foundation::{CFArray, CFPreferencesCopyAppValue, CFString};
 
-use crate::input_source::{self, Scope};
+use super::input_source::{self, Scope};
+use crate::cf::{cf_dicts, cf_get};
+use crate::{lock, main_thread};
 
 /// The enabled input sources, ordered as the system orders them (the input
 /// menu order). Main thread only.
-pub fn enabled() -> Vec<InputSource> {
-    let Some(mtm) = MainThreadMarker::new() else {
-        eprintln!("mojito-macos: TIS calls require the main thread");
-        return Vec::new();
-    };
-    selectable_keyboards(mtm)
-        .into_iter()
-        .map(|entry| InputSource {
-            id: entry.id,
-            name: entry.name,
-        })
-        .collect()
-}
-
-pub struct InputSource {
-    pub id: String,
-    pub name: String,
+pub fn enabled() -> Vec<KeyboardSource> {
+    main_thread("TIS access").map_or_else(Vec::new, selectable_keyboards)
 }
 
 /// The current keyboard input source's id. Main thread only.
@@ -116,7 +101,7 @@ pub fn toggle() -> Result<(), String> {
         Some(index) => list[(index + 1) % list.len()].id.clone(),
         None => list[0].id.clone(),
     };
-    let mut history = HISTORY.lock().unwrap_or_else(|error| error.into_inner());
+    let mut history = lock(&HISTORY);
     let mut next = observed(&history, &current_id);
     if next.previous.is_none() {
         next.previous = system_return_target(&list, &current_id);
@@ -149,13 +134,12 @@ fn system_return_target(list: &[KeyboardSource], current_id: &str) -> Option<Str
     })
 }
 
-struct KeyboardSource {
-    id: String,
-    name: String,
+pub struct KeyboardSource {
+    pub id: String,
+    pub name: String,
     source: input_source::InputSource,
 }
 
-/// The enabled, select-capable keyboard sources with their ids.
 fn selectable_keyboards(mtm: MainThreadMarker) -> Vec<KeyboardSource> {
     input_source::list(mtm, Scope::Enabled)
         .into_iter()
@@ -174,8 +158,7 @@ fn selectable_keyboards(mtm: MainThreadMarker) -> Vec<KeyboardSource> {
 /// localized name. Empty when the key is absent or shaped unexpectedly;
 /// this is a best-effort seed, never a hard dependency. Main thread only.
 pub fn system_history_names() -> Vec<String> {
-    if MainThreadMarker::new().is_none() {
-        eprintln!("mojito-macos: TIS calls require the main thread");
+    if main_thread("TIS access").is_none() {
         return Vec::new();
     }
     let key = CFString::from_static_str("AppleInputSourceHistory");
@@ -185,21 +168,10 @@ pub fn system_history_names() -> Vec<String> {
     else {
         return Vec::new();
     };
-    // SAFETY: every element of a CFArray is a CFType; each one is
-    // type-checked with `downcast` before use.
-    let history = unsafe { CFRetained::cast_unchecked::<CFArray<CFType>>(history) };
-    let name_key = CFString::from_static_str("KeyboardLayout Name");
-    history
+    cf_dicts(history)
         .iter()
-        .filter_map(|entry| {
-            let entry = entry.downcast::<CFDictionary>().ok()?;
-            // SAFETY: lookups only hash and compare keys (CFHash/CFEqual,
-            // defined for every CFType), and the value is type-checked.
-            let entry =
-                unsafe { CFRetained::cast_unchecked::<CFDictionary<CFString, CFType>>(entry) };
-            let name = entry.get(&name_key)?.downcast::<CFString>().ok()?;
-            Some(name.to_string())
-        })
+        .filter_map(|entry| cf_get::<CFString>(entry, "KeyboardLayout Name"))
+        .map(|name| name.to_string())
         .collect()
 }
 

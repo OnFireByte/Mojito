@@ -14,8 +14,8 @@ use objc2_foundation::{NSData, NSSize, NSString};
 /// The drink as menu-bar sprites: the 64px art nearest-decimated by
 /// scripts/make-icon.swift to the 1x/2x sizes, kept in-binary so the item
 /// works before and without the bundle.
-const STATUS_PNG_16: &[u8] = include_bytes!("../../../app/assets/mojito-status-16.png");
-const STATUS_PNG_32: &[u8] = include_bytes!("../../../app/assets/mojito-status-32.png");
+const STATUS_PNG_16: &[u8] = include_bytes!("../../../../app/assets/mojito-status-16.png");
+const STATUS_PNG_32: &[u8] = include_bytes!("../../../../app/assets/mojito-status-32.png");
 
 /// The status item image: the 32px sprite plus the 16px one as the 1x
 /// representation, drawn at 16pt. None if AppKit cannot decode the embedded
@@ -82,10 +82,8 @@ impl MenuTarget {
 struct StatusItemController {
     item: Retained<NSStatusItem>,
     /// NSMenuItem.target is a weak reference; the menu items would be left
-    /// aiming at a deallocated target if we did not own it here. Never
-    /// read: holding it is the point.
-    #[allow(dead_code)]
-    target: Retained<MenuTarget>,
+    /// aiming at a deallocated target if we did not own it here.
+    _target: Retained<MenuTarget>,
 }
 
 thread_local! {
@@ -93,10 +91,8 @@ thread_local! {
     static STATUS_ITEM: RefCell<Option<StatusItemController>> = const { RefCell::new(None) };
 }
 
-/// Install the status item; menu actions call `on_action` on the main thread.
 pub fn install(on_action: impl Fn(MenuAction) + 'static) -> Result<(), String> {
-    let mtm = MainThreadMarker::new()
-        .ok_or_else(|| "the status item requires the main thread".to_string())?;
+    let mtm = MainThreadMarker::new().ok_or("the status item requires the main thread")?;
     if STATUS_ITEM.with_borrow(|slot| slot.is_some()) {
         return Err("status item is already installed".into());
     }
@@ -106,7 +102,6 @@ pub fn install(on_action: impl Fn(MenuAction) + 'static) -> Result<(), String> {
     add_item(&menu, &target, "Settings…", sel!(openSettings:), mtm);
     add_item(&menu, &target, "Start at Login", sel!(toggleLogin:), mtm);
     add_item(&menu, &target, "Restore Caps Lock", sel!(restoreCaps:), mtm);
-    // About has no engine action; show it plain and disabled.
     let about = menu_item("About Mojito", None, mtm);
     about.setEnabled(false);
     menu.addItem(&about);
@@ -116,16 +111,17 @@ pub fn install(on_action: impl Fn(MenuAction) + 'static) -> Result<(), String> {
     let item = NSStatusBar::systemStatusBar().statusItemWithLength(-2.0);
     let button = item
         .button(mtm)
-        .ok_or_else(|| "status item button is unavailable".to_string())?;
-    let Some(image) = drink_image() else {
-        return Err("the status sprite did not decode".into());
-    };
+        .ok_or("status item button is unavailable")?;
+    let image = drink_image().ok_or("the status sprite did not decode")?;
     button.setImage(Some(&image));
     button.setToolTip(Some(&NSString::from_str("Mojito")));
     item.setMenu(Some(&menu));
 
     STATUS_ITEM.with_borrow_mut(|slot| {
-        *slot = Some(StatusItemController { item, target });
+        *slot = Some(StatusItemController {
+            item,
+            _target: target,
+        });
     });
     Ok(())
 }
@@ -187,14 +183,13 @@ fn add_item(
     title: &str,
     action: objc2::runtime::Sel,
     mtm: MainThreadMarker,
-) -> Retained<NSMenuItem> {
+) {
     let item = menu_item(title, Some(action), mtm);
     // SAFETY: every action passed here is a method `MenuTarget` defines with
     // the `(&self, sender)` shape AppKit calls, and `target` is kept alive
     // by `StatusItemController` because NSMenuItem holds it weakly.
     unsafe { item.setTarget(Some(target)) };
     menu.addItem(&item);
-    item
 }
 
 fn menu_item(

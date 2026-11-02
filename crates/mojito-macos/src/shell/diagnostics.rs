@@ -3,7 +3,7 @@ use objc2_core_graphics::{
     CGWindowListOption,
 };
 
-use crate::index::window_infos;
+use crate::apps::index::window_infos;
 
 /// Debug: every event tap installed on the system, with its pid, tap point,
 /// and mask, so a tap that eats keys before ours can be named.
@@ -75,7 +75,6 @@ unsafe extern "C" {
     fn proc_name(pid: i32, buffer: *mut u8, size: u32) -> i32;
 }
 
-/// The process name for a pid via libproc; "(unknown)" when it is gone.
 fn process_name(pid: i32) -> String {
     let mut buffer = [0_u8; 128];
     // SAFETY: the buffer outlives the call and its length bounds the write.

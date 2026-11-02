@@ -17,72 +17,68 @@ struct Pending {
     scheduled: bool,
 }
 
-pub struct ConfigStore {
+pub struct ConfigStore(Arc<Shared>);
+
+struct Shared {
     path: PathBuf,
     current: Arc<ArcSwap<Config>>,
     /// Single writer: durable writes (and the debounced label flush) are
     /// serialized so versions never go backwards.
-    writer: Arc<Mutex<()>>,
-    pending: Arc<Mutex<Pending>>,
+    writer: Mutex<()>,
+    pending: Mutex<Pending>,
 }
 
 impl ConfigStore {
-    /// Load from the default location; a missing or unreadable file loads
-    /// defaults and leaves the original untouched. An unreadable file is
-    /// preserved as `settings.json.unreadable-<sha256>` before any save
-    /// overwrites it.
+    /// A missing or unreadable file loads defaults and leaves the original
+    /// untouched. An unreadable file is preserved as
+    /// `settings.json.unreadable-<sha256>` before any save overwrites it.
     pub fn open(path: PathBuf) -> Self {
-        let current = Arc::new(ArcSwap::from_pointee(load(&path)));
-        ConfigStore {
+        ConfigStore(Arc::new(Shared {
+            current: Arc::new(ArcSwap::from_pointee(load(&path))),
             path,
-            current,
-            writer: Arc::new(Mutex::new(())),
-            pending: Arc::new(Mutex::new(Pending {
+            writer: Mutex::new(()),
+            pending: Mutex::new(Pending {
                 patch: LabelMemory::default(),
                 scheduled: false,
-            })),
-        }
+            }),
+        }))
     }
 
     pub fn handle(&self) -> Arc<ArcSwap<Config>> {
-        self.current.clone()
+        self.0.current.clone()
     }
 
     /// Durable write (fsync file and directory, one mutex), then swap the
     /// Arc so the engine sees the new config on its next event. The version
     /// is bumped here, not by callers, so every accepted save is hot-reloaded.
     pub fn save(&self, next: Config) -> Result<(), std::io::Error> {
-        persist(&self.path, &self.current, &self.writer, next)
+        self.0.persist(next)
     }
 
     /// Debounced merge of sticky label memory after a Live activation. The
     /// patch lands in a pending set; one background flush writes the merged
     /// config through the same durable path as `save`.
     pub fn merge_labels(&self, patch: LabelMemory) {
-        let mut pending = self.pending.lock().unwrap();
+        let mut pending = self.0.pending.lock().unwrap();
         pending.patch.0.extend(patch.0);
         if pending.scheduled {
             return;
         }
         pending.scheduled = true;
-        let path = self.path.clone();
-        let current = self.current.clone();
-        let writer = self.writer.clone();
-        let shared = self.pending.clone();
         drop(pending);
+        let shared = self.0.clone();
         let spawned = std::thread::Builder::new()
             .name("mojito-label-merge".into())
-            .spawn(move || flush_later(path, current, writer, shared));
+            .spawn(move || shared.flush_later());
         if spawned.is_err() {
-            // No thread, no flush: re-arm so the next merge can retry.
-            self.pending.lock().unwrap().scheduled = false;
+            self.0.pending.lock().unwrap().scheduled = false;
         }
     }
 
     /// Label memory is engine-owned: a settings save from another process
     /// must not roll it back to a stale snapshot.
     pub fn with_disk_labels(&self, mut next: Config) -> Config {
-        if let Ok(bytes) = std::fs::read(&self.path) {
+        if let Ok(bytes) = std::fs::read(&self.0.path) {
             let (disk, _) = crate::config::parse(&bytes);
             next.label_memory = disk.label_memory;
         }
@@ -95,74 +91,71 @@ impl ConfigStore {
     /// settings save never clobbers labels merged while the editor was
     /// open.
     pub fn reload(&self) -> Result<(), std::io::Error> {
-        let bytes = match std::fs::read(&self.path) {
+        let bytes = match std::fs::read(&self.0.path) {
             Ok(bytes) => bytes,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => Vec::new(),
             Err(error) => return Err(error),
         };
         let (mut next, _) = crate::config::parse(&bytes);
+        let _guard = self.0.writer.lock().unwrap();
+        next.version = self.0.current.load().version.max(next.version) + 1;
+        self.0.current.store(Arc::new(next));
+        Ok(())
+    }
+}
+
+impl Shared {
+    fn flush_later(&self) {
+        std::thread::sleep(std::time::Duration::from_millis(LABEL_DEBOUNCE_MS));
+        let patch = {
+            let mut pending = self.pending.lock().unwrap();
+            pending.scheduled = false;
+            std::mem::take(&mut pending.patch)
+        };
+        if patch.0.is_empty() {
+            return;
+        }
+        let mut next = (*self.current.load_full()).clone();
+        next.label_memory.0.extend(patch.0);
+        if let Err(error) = self.persist(next) {
+            eprintln!(
+                "mojito: label memory write to {}: {error}",
+                self.path.display()
+            );
+        }
+    }
+
+    fn persist(&self, mut next: Config) -> Result<(), std::io::Error> {
         let _guard = self.writer.lock().unwrap();
-        next.version = self.current.load().version.max(next.version) + 1;
+        next.version = self.current.load().version.wrapping_add(1);
+        let bytes = serde_json::to_vec_pretty(&next)
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+        if let Some(dir) = self.path.parent() {
+            let _ = std::fs::create_dir_all(dir);
+        }
+        let tmp = self
+            .path
+            .with_extension(format!("json.tmp-{}", std::process::id()));
+        {
+            let mut file = std::fs::File::create(&tmp)?;
+            file.write_all(&bytes)?;
+            file.sync_all()?;
+        }
+        std::fs::rename(&tmp, &self.path)?;
+        // Directory entry durability is best-effort; the file itself is synced.
+        if let Some(dir) = self.path.parent()
+            && let Ok(dir) = std::fs::File::open(dir)
+        {
+            let _ = dir.sync_all();
+        }
         self.current.store(Arc::new(next));
         Ok(())
     }
 }
 
-fn flush_later(
-    path: PathBuf,
-    current: Arc<ArcSwap<Config>>,
-    writer: Arc<Mutex<()>>,
-    pending: Arc<Mutex<Pending>>,
-) {
-    std::thread::sleep(std::time::Duration::from_millis(LABEL_DEBOUNCE_MS));
-    let patch = {
-        let mut pending = pending.lock().unwrap();
-        pending.scheduled = false;
-        std::mem::take(&mut pending.patch)
-    };
-    if patch.0.is_empty() {
-        return;
-    }
-    let mut next = (*current.load_full()).clone();
-    next.label_memory.0.extend(patch.0);
-    if let Err(error) = persist(&path, &current, &writer, next) {
-        eprintln!("mojito: label memory write to {}: {error}", path.display());
-    }
-}
-
-fn persist(
-    path: &Path,
-    current: &ArcSwap<Config>,
-    writer: &Mutex<()>,
-    mut next: Config,
-) -> Result<(), std::io::Error> {
-    let _guard = writer.lock().unwrap();
-    next.version = current.load().version.wrapping_add(1);
-    let bytes = serde_json::to_vec_pretty(&next)
-        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
-    if let Some(dir) = path.parent() {
-        let _ = std::fs::create_dir_all(dir);
-    }
-    let tmp = path.with_extension(format!("json.tmp-{}", std::process::id()));
-    {
-        let mut file = std::fs::File::create(&tmp)?;
-        file.write_all(&bytes)?;
-        file.sync_all()?;
-    }
-    std::fs::rename(&tmp, path)?;
-    // Directory entry durability is best-effort; the file itself is synced.
-    if let Some(dir) = path.parent()
-        && let Ok(dir) = std::fs::File::open(dir)
-    {
-        let _ = dir.sync_all();
-    }
-    current.store(Arc::new(next));
-    Ok(())
-}
-
 fn load(path: &Path) -> Config {
     let Ok(bytes) = std::fs::read(path) else {
-        return Config::default(); // missing (or unreadable) -> defaults
+        return Config::default();
     };
     if bytes.is_empty() {
         return Config::default();
@@ -379,7 +372,6 @@ mod tests {
         assert!(warnings.is_empty());
         assert_eq!(config.label_memory.0.get("com.a"), Some(&PhysicalKey(3)));
         assert_eq!(config.label_memory.0.get("com.b"), Some(&PhysicalKey(2)));
-        // Existing pins survive the label flush.
         assert_eq!(config.version, 2);
     }
 }

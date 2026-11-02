@@ -4,40 +4,26 @@
 /// CGEvent virtual keycode: the physical position of a key, stable across
 /// keyboard layouts and input languages. Built only from CGEvents (backend)
 /// or config parsing (boundary), never from a character.
-#[derive(
-    Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Debug, serde::Serialize, serde::Deserialize,
-)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Debug, serde::Serialize)]
 pub struct PhysicalKey(pub u16);
 
-/// HID usage id in the keyboard page (the hidutil numbering space).
-/// Deliberately a distinct type from [`PhysicalKey`]: Caps Lock is usage 0x39
-/// and virtual keycode 0x39 by coincidence, but F18 is usage 0x6D and virtual
-/// keycode 0x4F, and conflating the spaces breaks remaps silently.
-#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
-pub struct HidUsage(pub u64);
-
-/// Masked CGEvent modifier flags, opaque outside the platform backend.
 #[derive(Clone, Copy, PartialEq, Eq, Default, Debug)]
-pub struct ModifierFlags(pub u64);
+pub struct ModifierFlags(pub u8);
 
 impl ModifierFlags {
     pub const NONE: Self = Self(0);
-    pub const SHIFT: Self = Self(1 << 17);
-    pub const CTRL: Self = Self(1 << 18);
-    pub const OPT: Self = Self(1 << 19);
-    pub const CMD: Self = Self(1 << 20);
+    pub const SHIFT: Self = Self(1 << 0);
+    pub const CTRL: Self = Self(1 << 1);
+    pub const OPT: Self = Self(1 << 2);
+    pub const CMD: Self = Self(1 << 3);
 
     pub fn intersects(self, other: Self) -> bool {
         self.0 & other.0 != 0
     }
-
-    pub fn keep_modifiers(self) -> Self {
-        Self(self.0 & (Self::SHIFT.0 | Self::CTRL.0 | Self::OPT.0 | Self::CMD.0))
-    }
 }
 
 /// Virtual keycodes verified against the SDK's HIToolbox/Events.h.
-pub const F18: PhysicalKey = PhysicalKey(0x4F);
+pub const META: PhysicalKey = PhysicalKey(0x4F);
 pub const ESC: PhysicalKey = PhysicalKey(0x35);
 pub const RETURN: PhysicalKey = PhysicalKey(0x24);
 pub const BACKSPACE: PhysicalKey = PhysicalKey(0x33);
@@ -47,19 +33,6 @@ pub const ARROW_DOWN: PhysicalKey = PhysicalKey(0x7D);
 pub const ARROW_UP: PhysicalKey = PhysicalKey(0x7E);
 pub const SWITCHER: PhysicalKey = PhysicalKey(0x0E);
 pub const TAB: PhysicalKey = PhysicalKey(0x30);
-
-/// HID usages for the hidutil remap. Apple TN2450 encodes a full usage as
-/// (usage_page << 32) | usage, so keyboard-page values are 36-bit: caps lock
-/// is 0x700000039 and F18 is 0x70000006D. u64 on purpose.
-pub const CAPS_USAGE: HidUsage = HidUsage(0x7_0000_0039);
-pub const F18_USAGE: HidUsage = HidUsage(0x7_0000_006D);
-
-/// Reserved control keycodes: unassigned on macOS keyboards (hex's
-/// chord-breaker hole and its neighbor). The UI posts unmarked synthetic
-/// keyDowns here to reach the engine, and the tap swallows them.
-pub const CONTROL: PhysicalKey = PhysicalKey(0x44);
-/// Posts "the settings file changed": the tap turns it into a config reload.
-pub const CONTROL_RELOAD: PhysicalKey = PhysicalKey(0x46);
 
 /// US-ANSI position to glyph, for badges and labels only. Never used to
 /// interpret a keystroke. Positions without a printable glyph (F-keys,
@@ -129,7 +102,10 @@ pub fn glyph(key: PhysicalKey) -> char {
         0x4C => '⏎',
         0x4E => '-',
         0x51 => '=',
-        0x53..=0x5C => char::from(b'0' + (key.0 - 0x53) as u8),
+        0x52 => '0',
+        0x53..=0x59 => char::from(b'1' + (key.0 - 0x53) as u8),
+        0x5B => '8',
+        0x5C => '9',
         0x7B => '←',
         0x7C => '→',
         0x7D => '↓',
@@ -142,19 +118,6 @@ pub fn glyph(key: PhysicalKey) -> char {
 mod tests {
     use super::*;
 
-    /// The trap the architecture doc warns about: keycode 0x4F and HID usage
-    /// 0x70000006D both name F18, in different spaces. The TN2450 encoding is
-    /// (usage_page << 32) | usage, so the usage constants are 36-bit.
-    #[test]
-    fn keycode_spaces_are_distinct_and_golden() {
-        assert_eq!(F18, PhysicalKey(0x4F));
-        assert_eq!(F18_USAGE, HidUsage(0x7_0000_006D));
-        assert_eq!(CAPS_USAGE, HidUsage(0x7_0000_0039));
-        assert_eq!(F18_USAGE.0, 30064771181);
-        assert_eq!(CAPS_USAGE.0, 30064771129);
-        assert_ne!(F18.0 as u64, F18_USAGE.0);
-    }
-
     #[test]
     fn glyphs_follow_us_ansi_positions() {
         assert_eq!(glyph(PhysicalKey(0x00)), 'A');
@@ -166,7 +129,19 @@ mod tests {
         assert_eq!(glyph(PhysicalKey(0x31)), '␣');
         assert_eq!(glyph(ARROW_LEFT), '←');
         assert_eq!(glyph(ARROW_UP), '↑');
-        // F18 has no printable US-ANSI glyph; the table stays total.
-        assert_eq!(glyph(F18), '·');
+        assert_eq!(glyph(META), '·');
+    }
+
+    #[test]
+    fn keypad_digits_follow_events_h_and_skip_f20() {
+        let keypad = [0x52, 0x53, 0x54, 0x55, 0x56, 0x57, 0x58, 0x59, 0x5B, 0x5C];
+        for (digit, code) in ('0'..='9').zip(keypad) {
+            assert_eq!(
+                glyph(PhysicalKey(code)),
+                digit,
+                "keypad {digit} at {code:#x}"
+            );
+        }
+        assert!(!glyph(PhysicalKey(0x5A)).is_ascii_digit());
     }
 }

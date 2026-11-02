@@ -8,14 +8,12 @@ pub mod engine;
 pub mod geom;
 pub mod key;
 pub mod labels;
+pub mod lifecycle;
 pub mod store;
 pub mod tables;
 
-pub use bridge::{AppIndex, AppRef, Job, SwitchRequest, UiMsg};
+pub use bridge::{AppIndex, AppRef, Job, UiMsg};
 pub use config::{Config, PinnedApp, SwitcherTrigger};
 pub use engine::{Action, Engine, Mono, RawKey, SynthKey};
-pub use key::{
-    ARROW_DOWN, ARROW_LEFT, ARROW_RIGHT, ARROW_UP, CAPS_USAGE, CONTROL, CONTROL_RELOAD, F18_USAGE,
-    ModifierFlags, PhysicalKey,
-};
+pub use key::{ARROW_DOWN, ARROW_LEFT, ARROW_RIGHT, ARROW_UP, ModifierFlags, PhysicalKey};
 pub use store::ConfigStore;

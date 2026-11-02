@@ -12,9 +12,3 @@ rune-kit = { git = "https://github.com/anomalyco/rune", rev = "092dec2e40436d683
 rune-theme-opencode = { git = "https://github.com/anomalyco/rune", rev = "092dec2e40436d6835fe25ebc8a994fe67f3c9e4" }
 serde.workspace = true
 serde_json.workspace = true
-objc2.workspace = true
-objc2-foundation.workspace = true
-objc2-app-kit.workspace = true
-dispatch2.workspace = true
-objc2-core-foundation.workspace = true
-objc2-core-graphics.workspace = true
