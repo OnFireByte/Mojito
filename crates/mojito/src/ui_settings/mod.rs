@@ -17,7 +17,7 @@ use mojito_core::{ConfigStore, PhysicalKey};
 use mojito_macos::caps::CapsMap;
 use mojito_macos::layout::LayoutInfo;
 use mojito_macos::{layout, permission};
-use rune::{App, AppHandle, PhysicalInput, RunOptions, Tx, WindowSpec};
+use rune::{App, AppHandle, Key, KeyEvent, PhysicalInput, RunOptions, TextEdit, Tx, WindowSpec};
 
 use crate::Hub;
 use crate::catalog::{self, CatalogApp};
@@ -98,6 +98,7 @@ pub struct SettingsState {
     catalog_open: bool,
     catalog: CatalogState,
     catalog_rx: Option<mpsc::Receiver<Vec<CatalogApp>>>,
+    query: TextEdit,
     tap_max: u16,
     /// The chosen hint layout (InputSourceID); None follows the current one.
     hint_layout: Option<String>,
@@ -129,6 +130,7 @@ impl SettingsState {
             catalog_open: false,
             catalog: CatalogState::Idle,
             catalog_rx: None,
+            query: TextEdit::new(""),
             tap_max: 250,
             hint_layout: None,
             layouts: Vec::new(),
@@ -224,6 +226,7 @@ pub fn closed(s: &mut SettingsState, _: &mut Tx) {
     s.hub.set_dock_icon(false);
     s.capturing = None;
     s.hint_menu_open = false;
+    close_catalog(s);
     s.live_refresh = false;
     let usage = procwatch::usage();
     let mb = |bytes: Option<u64>| {
@@ -352,7 +355,7 @@ fn next_free_key(s: &SettingsState) -> Option<PhysicalKey> {
 }
 
 fn add_app(s: &mut SettingsState, app: &CatalogApp) {
-    if s.rows.iter().any(|r| r.bundle_id == app.bundle_id) {
+    if is_pinned(s, &app.bundle_id) {
         s.status = Some(Status {
             text: format!("{} is already pinned", app.name),
             error: false,
@@ -366,17 +369,58 @@ fn add_app(s: &mut SettingsState, app: &CatalogApp) {
         key,
         glyph: key.and_then(layout::glyph),
     });
-    s.catalog_open = false;
+    close_catalog(s);
 }
 
-pub(super) fn open_catalog(s: &mut SettingsState) {
-    s.catalog_open = !s.catalog_open;
-    if s.catalog_open && matches!(s.catalog, CatalogState::Idle) {
+fn catalog_matches(s: &SettingsState) -> Vec<&CatalogApp> {
+    match &s.catalog {
+        CatalogState::Ready(list) => catalog::search(list, &s.query.text),
+        CatalogState::Idle | CatalogState::Loading => Vec::new(),
+    }
+}
+
+fn add_top_match(s: &mut SettingsState) {
+    if let Some(app) = catalog_matches(s).first().map(|app| (*app).clone()) {
+        add_app(s, &app);
+    }
+}
+
+fn is_pinned(s: &SettingsState, bundle_id: &str) -> bool {
+    s.rows.iter().any(|r| r.bundle_id == bundle_id)
+}
+
+pub(super) fn toggle_catalog(s: &mut SettingsState) {
+    if s.catalog_open {
+        close_catalog(s);
+    } else {
+        open_catalog(s);
+    }
+}
+
+fn open_catalog(s: &mut SettingsState) {
+    s.catalog_open = true;
+    s.capturing = None;
+    s.query = TextEdit::new("");
+    s.query.focused = true;
+    if matches!(s.catalog, CatalogState::Idle) {
         s.catalog = CatalogState::Loading;
         let (tx, rx) = mpsc::channel();
         s.catalog_rx = Some(rx);
         catalog::scan(tx);
     }
+}
+
+fn close_catalog(s: &mut SettingsState) {
+    s.catalog_open = false;
+    s.query = TextEdit::new("");
+}
+
+fn catalog_key(s: &mut SettingsState, ev: &KeyEvent, _: &mut Tx) -> bool {
+    if ev.key == Key::Escape {
+        close_catalog(s);
+        return true;
+    }
+    false
 }
 
 /// Apply the picked hint layout now — a main-thread TIS call — and save it

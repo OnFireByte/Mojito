@@ -7,7 +7,7 @@ use rune_kit::{Button, ButtonVariant, ControlSize};
 
 use super::controls::{METRICS, Paint, page};
 use super::panes;
-use super::{Pane, SettingsState, open_catalog, save};
+use super::{Pane, SettingsState, save, toggle_catalog};
 
 /// How far a scroll body's top and bottom edges fade out.
 const SCROLL_FADE: (f32, f32) = (4.0, 24.0);
@@ -70,12 +70,12 @@ fn pane_header(s: &SettingsState, p: Paint) -> El {
     let action = match s.pane {
         Pane::Apps => Some(
             Button::new(if s.catalog_open {
-                "Hide list"
+                "Cancel"
             } else {
                 "Add app…"
             })
             .variant(ButtonVariant::Neutral)
-            .on_press(open_catalog)
+            .on_press(toggle_catalog)
             .control_size(ControlSize::Large)
             .build(p.k)
             .px(11.0)

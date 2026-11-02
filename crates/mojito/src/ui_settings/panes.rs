@@ -3,21 +3,21 @@
 //! (permissions and the Caps Lock remap).
 
 use rune::{El, PhysicalInput, ScrollSpec, Tx, col, el, icon, row, text};
-use rune_kit::{Badge, BadgeVariant, ButtonVariant};
+use rune_kit::{Badge, BadgeVariant, ButtonVariant, TextInput};
 
 use super::controls::{
     Choice, METRICS, Paint, banner, button, icon_button, note, pressable_row, pulsing_dot, section,
     select, setting_row, small_button,
 };
 use super::{
-    CatalogState, PinnedDraft, SettingsState, add_app, capture_input, choose_layout, remove_row,
-    start_capture, toggle_remap,
+    CatalogState, PinnedDraft, SettingsState, add_app, add_top_match, capture_input, catalog_key,
+    catalog_matches, choose_layout, is_pinned, remove_row, start_capture, toggle_remap,
 };
 use crate::catalog::CatalogApp;
 use mojito_macos::permission;
 
 /// How tall the catalog list may grow before it scrolls inside its card.
-const CATALOG_HEIGHT: f32 = 240.0;
+const CATALOG_HEIGHT: f32 = 320.0;
 
 /// The sections column; `view` supplies the page's gutter.
 fn sections(key: &str) -> El {
@@ -25,11 +25,9 @@ fn sections(key: &str) -> El {
 }
 
 pub(super) fn apps(s: &SettingsState, p: Paint, _layer: &mut Vec<El>) -> El {
-    let mut list = sections("apps").child(pinned_card(s, p));
-    if s.catalog_open {
-        list = list.child(catalog_card(s, p));
-    }
-    list
+    sections("apps")
+        .children(s.catalog_open.then(|| catalog_card(s, p)))
+        .child(pinned_card(s, p))
 }
 
 pub(super) fn behavior(s: &SettingsState, p: Paint, layer: &mut Vec<El>) -> El {
@@ -178,60 +176,109 @@ fn catalog_card(s: &SettingsState, p: Paint) -> El {
             note("scanning", "Scanning installed apps…", p.muted())
         }
         CatalogState::Ready(list) if list.is_empty() => note("none", "No apps found", p.muted()),
-        CatalogState::Ready(list) => {
-            // Bounded height so the page scrolls instead of stretching.
-            col().key("catalog").h(CATALOG_HEIGHT).min_h(0.0).child(
-                col()
-                    .w_full()
-                    .h_full()
-                    .min_h(0.0)
-                    .scroll(ScrollSpec {
-                        stick_bottom: false,
-                    })
-                    .children(
-                        list.iter()
-                            .enumerate()
-                            .map(|(i, app)| catalog_row(p, i, app)),
-                    ),
-            )
-        }
+        CatalogState::Ready(_) => catalog_list(s, p),
     };
-    section(p, "catalog", "Choose an app", vec![body])
+    section(p, "catalog", "Add an app", vec![search_field(s, p), body])
+}
+
+fn search_field(s: &SettingsState, p: Paint) -> El {
+    row().key("search").px(METRICS.row_px).py(10.0).child(
+        TextInput::new(&s.query)
+            .placeholder("Search by name or bundle ID")
+            .leading_icon(p.k.glyph.search)
+            .large()
+            .width(None)
+            .on_edit(|s: &mut SettingsState| &mut s.query)
+            .on_submit(|s: &mut SettingsState, _: &mut Tx| add_top_match(s))
+            .on_key(catalog_key)
+            .build(p.k)
+            .key("query"),
+    )
+}
+
+fn catalog_list(s: &SettingsState, p: Paint) -> El {
+    let matches = catalog_matches(s);
+    if matches.is_empty() {
+        return note(
+            "no-match",
+            &format!("No apps match “{}”", s.query.text.trim()),
+            p.muted(),
+        );
+    }
+    let highlight_top = !s.query.text.trim().is_empty();
+    // Bounded height so the page scrolls instead of stretching.
+    col().key("catalog").h(CATALOG_HEIGHT).min_h(0.0).child(
+        col()
+            .w_full()
+            .h_full()
+            .min_h(0.0)
+            .px(METRICS.row_px - 8.0)
+            .pb(8.0)
+            .scroll(ScrollSpec {
+                stick_bottom: false,
+            })
+            .children(matches.into_iter().enumerate().map(|(i, app)| {
+                catalog_row(
+                    p,
+                    app,
+                    is_pinned(s, &app.bundle_id),
+                    highlight_top && i == 0,
+                )
+            })),
+    )
 }
 
 /// A catalog row is one clickable target: pressing it pins the app.
-fn catalog_row(p: Paint, i: usize, app: &CatalogApp) -> El {
-    let name = app.name.clone();
-    let bundle_id = app.bundle_id.clone();
+fn catalog_row(p: Paint, app: &CatalogApp, pinned: bool, top: bool) -> El {
     let row_app = app.clone();
-    row()
-        .key(format!("cat-{i}"))
+    let mut item = row()
+        .key(format!("cat-{}", app.bundle_id))
         .h(36.0)
-        .px(METRICS.row_px)
+        .px(8.0)
         .gap(10.0)
         .center_y()
         .radius(p.k.radius.md)
         .hover(p.k.c.hover)
         .on_press(move |s: &mut SettingsState| add_app(s, &row_app))
+        .child(monogram(p, &app.name))
         .child(
-            text(name)
+            text(app.name.clone())
                 .font(p.k.ty.ui)
-                .color(p.text())
+                .color(if pinned { p.muted() } else { p.text() })
                 .grow(1.0)
                 .truncate(),
         )
         .child(
-            text(bundle_id)
+            text(app.bundle_id.clone())
                 .font(p.k.ty.small)
                 .color(p.muted())
                 .grow(1.0)
                 .truncate(),
-        )
-        .child(
-            icon(&rune_theme_opencode::icons::PLUS, 14.0)
-                .key("add")
-                .color(p.k.c.icon_muted),
-        )
+        );
+    let status = if pinned {
+        row()
+            .key("pinned")
+            .gap(4.0)
+            .center_y()
+            .child(icon(&rune_theme_opencode::icons::CHECK_SMALL, 14.0).color(p.k.c.icon_muted))
+            .child(text("Pinned").font(p.k.ty.small).color(p.muted()))
+    } else {
+        icon(&rune_theme_opencode::icons::PLUS, 14.0)
+            .key("add")
+            .color(p.k.c.icon_muted)
+    };
+    item = item.child(
+        row()
+            .key("status")
+            .w(64.0)
+            .center_y()
+            .justify_end()
+            .child(status),
+    );
+    if top {
+        item = item.fill(p.k.c.layer_02);
+    }
+    item
 }
 
 // --- Behavior -------------------------------------------------------------
