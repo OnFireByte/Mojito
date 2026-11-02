@@ -68,28 +68,7 @@ pub struct Switcher {
 impl Switcher {
     pub fn create() -> Self {
         let mtm = MainThreadMarker::new().expect("the switcher lives on the main thread");
-        let frame = NSRect::new(NSPoint::ZERO, NSSize::new(CARD_W, card_height(0)));
-        let panel = NSPanel::initWithContentRect_styleMask_backing_defer(
-            NSPanel::alloc(mtm),
-            frame,
-            NSWindowStyleMask::Borderless | NSWindowStyleMask::NonactivatingPanel,
-            NSBackingStoreType::Buffered,
-            true,
-        );
-        panel.setOpaque(false);
-        panel.setBackgroundColor(Some(&NSColor::clearColor()));
-        panel.setHasShadow(true);
-        panel.setLevel(STATUS_WINDOW_LEVEL);
-        panel.setHidesOnDeactivate(false);
-        panel.setAnimationBehavior(NSWindowAnimationBehavior::None);
-        panel.setCollectionBehavior(
-            NSWindowCollectionBehavior::CanJoinAllSpaces
-                | NSWindowCollectionBehavior::FullScreenAuxiliary
-                | NSWindowCollectionBehavior::Stationary
-                | NSWindowCollectionBehavior::IgnoresCycle,
-        );
-        let root = NSView::initWithFrame(NSView::alloc(mtm), frame);
-        panel.setContentView(Some(&root));
+        let (panel, root) = new_panel(mtm);
         Self {
             panel,
             root,
@@ -101,7 +80,8 @@ impl Switcher {
 
     pub fn show(&mut self, mode: Mode, rows: &[Row]) {
         self.advance();
-        clear(&self.root);
+        release(&self.panel, &self.root);
+        (self.panel, self.root) = new_panel(self.mtm);
         let size = (CARD_W, card_height(rows.len()));
         self.panel
             .setFrame_display(placement(size, self.mtm), false);
@@ -170,6 +150,32 @@ impl Switcher {
             unsafe { NSEvent::removeMonitor(&monitor) };
         }
     }
+}
+
+fn new_panel(mtm: MainThreadMarker) -> (Retained<NSPanel>, Retained<NSView>) {
+    let frame = NSRect::new(NSPoint::ZERO, NSSize::new(CARD_W, card_height(0)));
+    let panel = NSPanel::initWithContentRect_styleMask_backing_defer(
+        NSPanel::alloc(mtm),
+        frame,
+        NSWindowStyleMask::Borderless | NSWindowStyleMask::NonactivatingPanel,
+        NSBackingStoreType::Buffered,
+        true,
+    );
+    panel.setOpaque(false);
+    panel.setBackgroundColor(Some(&NSColor::clearColor()));
+    panel.setHasShadow(true);
+    panel.setLevel(STATUS_WINDOW_LEVEL);
+    panel.setHidesOnDeactivate(false);
+    panel.setAnimationBehavior(NSWindowAnimationBehavior::None);
+    panel.setCollectionBehavior(
+        NSWindowCollectionBehavior::CanJoinAllSpaces
+            | NSWindowCollectionBehavior::FullScreenAuxiliary
+            | NSWindowCollectionBehavior::Stationary
+            | NSWindowCollectionBehavior::IgnoresCycle,
+    );
+    let root = NSView::initWithFrame(NSView::alloc(mtm), frame);
+    panel.setContentView(Some(&root));
+    (panel, root)
 }
 
 fn release(panel: &NSPanel, root: &NSView) {
